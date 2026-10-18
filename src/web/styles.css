@@ -93,6 +93,9 @@ input:focus, textarea:focus, select:focus { border-color: var(--ink); box-shadow
 .mode-control { border: 1px solid var(--rule); display: flex; padding: 3px; background: rgba(255,255,255,.35); }
 .mode-control button, .icon-action { border: 0; background: transparent; padding: 7px 10px; font: 500 10px "DM Mono", monospace; text-transform: uppercase; }
 .mode-control button.active { background: var(--ink); color: var(--paper-bright); }
+.sandbox-control { border: 1px solid var(--rule); background: rgba(255,255,255,.35); padding: 9px 10px; font: 500 10px "DM Mono", monospace; color: var(--ink); }
+.sandbox-readout { color: var(--muted); font: 500 10px "DM Mono", monospace; }
+.sandbox-unavailable { color: var(--oracle); font: 500 11px "DM Mono", monospace; }
 .icon-action { border: 1px solid var(--rule); }
 .agent-strip { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border-bottom: 1px solid var(--rule); }
 .agent-card { padding: 16px 22px; min-height: 122px; border-right: 1px solid var(--rule); position: relative; overflow: hidden; }

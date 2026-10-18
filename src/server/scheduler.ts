@@ -21,6 +21,7 @@ import {
   type ProviderTool
 } from "./provider.js";
 import type { Store } from "./store.js";
+import { inspectBubblewrap } from "./sandbox.js";
 import { inspectForApproval, WorkspaceTools, type ToolResult } from "./tools.js";
 
 interface RunHandle {
@@ -240,6 +241,18 @@ export class Scheduler {
     const session = this.requireSession(sessionId);
     if (!["interrupted", "awaiting_user", "paused"].includes(session.status)) {
       throw new BrawlError(`Cannot resume from ${session.status}`, 409);
+    }
+    if (session.sandboxMode !== "disabled") {
+      const sandbox = await inspectBubblewrap();
+      if (!sandbox.available) {
+        throw new BrawlError(
+          `Sandbox unavailable: ${sandbox.error ?? "Bubblewrap cannot execute"}`,
+          409
+        );
+      }
+    }
+    if (mode === "fun" && session.sandboxMode === "auto-review") {
+      throw new BrawlError("auto-review sandbox mode is only available in productive mode", 409);
     }
     await this.start(sessionId, null, mode);
   }
@@ -781,10 +794,34 @@ export class Scheduler {
     }
     const action = name as ToolName;
     const workspace = this.requireSession(sessionId).workspace;
-    const tools = new WorkspaceTools(workspace, this.configStore.get().shellTimeoutMs);
+    const sandboxMode = this.requireSession(sessionId).sandboxMode;
+    const tools = new WorkspaceTools(
+      workspace,
+      this.configStore.get().shellTimeoutMs,
+      sandboxMode === "enabled" ? "enabled" : "disabled"
+    );
     const immutableArgs = await inspectForApproval(tools, action, args);
     if (mode === "productive") {
-      const result = await tools.execute(action, immutableArgs, signal);
+      let result: ToolResult;
+      if (action === "shell_exec" && sandboxMode === "auto-review") {
+        const review = await this.reviewShellCommand(
+          sessionId,
+          workOrder,
+          immutableArgs,
+          signal
+        );
+        if (!review.allow) {
+          result = {
+            ok: false,
+            output: `Sandbox review refused: ${review.reason}`,
+            data: { sandboxReview: "refused", reason: review.reason }
+          };
+        } else {
+          result = await tools.execute(action, immutableArgs, signal);
+        }
+      } else {
+        result = await tools.execute(action, immutableArgs, signal);
+      }
       this.recordTool(sessionId, role, action, immutableArgs, result);
       return JSON.stringify(result);
     }
@@ -823,11 +860,30 @@ export class Scheduler {
     if (!current || current.status !== "pending" || current.digest !== proposal.digest) return;
     this.store.updateProposal(current.id, { status: "executed" });
     this.events.publish(sessionId, { type: "proposal", proposal: null });
+    const session = this.requireSession(sessionId);
     const tools = new WorkspaceTools(
-      this.requireSession(sessionId).workspace,
-      this.configStore.get().shellTimeoutMs
+      session.workspace,
+      this.configStore.get().shellTimeoutMs,
+      session.sandboxMode === "enabled" ? "enabled" : "disabled"
     );
-    const result = await tools.execute(current.action, current.args, signal);
+    let result: ToolResult;
+    if (current.action === "shell_exec" && session.sandboxMode === "auto-review") {
+      const review = await this.reviewShellCommand(
+        sessionId,
+        this.store.activeWorkOrder(sessionId),
+        current.args,
+        signal
+      );
+      result = review.allow
+        ? await tools.execute(current.action, current.args, signal)
+        : {
+            ok: false,
+            output: `Sandbox review refused: ${review.reason}`,
+            data: { sandboxReview: "refused", reason: review.reason }
+          };
+    } else {
+      result = await tools.execute(current.action, current.args, signal);
+    }
     if (!result.ok) {
       this.store.updateProposal(current.id, { status: "failed" });
     }
@@ -855,6 +911,78 @@ export class Scheduler {
       content: result.output,
       data: { ok: result.ok, ...result.data }
     });
+  }
+
+  private async reviewShellCommand(
+    sessionId: string,
+    workOrder: WorkOrder | null,
+    args: Record<string, unknown>,
+    signal: AbortSignal
+  ): Promise<{ allow: boolean; reason: string }> {
+    if (!workOrder || workOrder.status !== "active") {
+      return {
+        allow: false,
+        reason: "Oracle is required to have an active work order before command review"
+      };
+    }
+    const config = this.agentConfig("oracle");
+    const provider = this.requireProvider(config.providerId);
+    const command = String(args.command ?? "");
+    const timeoutMs = args.timeoutMs ?? this.configStore.get().shellTimeoutMs;
+    const context = this.store
+      .events(sessionId)
+      .filter(
+        (event) =>
+          ["user_message", "speaker_message", "agent_message", "plan", "work_order"].includes(
+            event.type
+          )
+      )
+      .slice(-30)
+      .map((event) => `${event.role}/${event.type}: ${event.content}`)
+      .join("\n\n")
+      .slice(-30_000);
+    const messages: ProviderMessage[] = [
+      {
+        role: "system",
+        content: `You are Oracle, acting as an ephemeral sandbox reviewer. Decide whether one exact shell command is safe to run and aligns with the user's intent and active work order.
+This review is not a planning turn. You have no tools and no history outside the supplied context.
+Deny commands that escape the workspace, access network, alter system configuration, invoke sudo or privilege escalation, expose credentials, persist outside the workspace, or exceed the stated intent.
+Return only JSON in the form {"allow":true,"reason":"brief reason"} or {"allow":false,"reason":"specific denial reason"}.
+A denial must include a non-empty reason.`
+      },
+      {
+        role: "user",
+        content: `Visible session context:
+${context || "(none)"}
+
+Active work order:
+${workOrder.id}: ${workOrder.objective}
+Constraints: ${workOrder.constraints.join("; ") || "(none)"}
+Acceptance criteria: ${workOrder.acceptanceCriteria.join("; ") || "(none)"}
+
+Exact shell_exec request:
+${command}
+Timeout: ${String(timeoutMs)}
+Sandbox mode: auto-review (the command will run in the configured workspace if allowed).`
+      }
+    ];
+    try {
+      const reply = await complete({
+        provider,
+        config,
+        messages,
+        tools: [],
+        signal,
+        onDelta: () => undefined
+      });
+      return parseSandboxReview(reply.text);
+    } catch (error) {
+      if (signal.aborted) throw error;
+      return {
+        allow: false,
+        reason: `Sandbox review failed: ${error instanceof Error ? error.message : String(error)}`
+      };
+    }
   }
 
   private async finishReview(sessionId: string, workOrder: WorkOrder): Promise<void> {
@@ -1180,4 +1308,25 @@ function isWorkspaceTool(value: string): value is ToolName {
     "workspace_patch",
     "shell_exec"
   ].includes(value);
+}
+
+function parseSandboxReview(text: string): { allow: boolean; reason: string } {
+  const trimmed = text.trim();
+  const json = trimmed.match(/\{[\s\S]*\}/)?.[0] ?? "";
+  try {
+    const value = JSON.parse(json) as { allow?: unknown; reason?: unknown };
+    if (typeof value.allow !== "boolean") {
+      return { allow: false, reason: "Oracle returned a malformed sandbox review" };
+    }
+    const reason = typeof value.reason === "string" ? value.reason.trim() : "";
+    if (!value.allow && !reason) {
+      return { allow: false, reason: "Oracle denied the command without a reason" };
+    }
+    return {
+      allow: value.allow,
+      reason: reason || "Command approved by Oracle"
+    };
+  } catch {
+    return { allow: false, reason: "Oracle returned malformed sandbox review JSON" };
+  }
 }

@@ -11,12 +11,14 @@ import {
   ROLES,
   REASONING_EFFORTS,
   ROLE_LABELS,
+  SANDBOX_MODES,
   type ActionProposal,
   type AgentState,
   type Mode,
   type ProviderDraft,
   type PublicHarnessConfig,
   type Role,
+  type SandboxMode,
   type Session,
   type SessionDetail,
   type StreamEnvelope,
@@ -37,14 +39,27 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   const [token, setLocalToken] = useState(getToken());
   const [workspace, setWorkspace] = useState("");
+  const [sandboxMode, setSandboxMode] = useState<SandboxMode>("enabled");
+  const [capabilities, setCapabilities] = useState<{
+    sandboxModes: SandboxMode[];
+    sandboxAvailable: boolean;
+  } | null>(null);
   const [creating, setCreating] = useState(false);
   const selectedIdRef = useRef(selectedId);
   selectedIdRef.current = selectedId;
 
   const refresh = async () => {
     try {
-      const [nextConfig, nextSessions] = await Promise.all([api.config(), api.sessions()]);
+      const [nextConfig, nextSessions, nextCapabilities] = await Promise.all([
+        api.config(),
+        api.sessions(),
+        api.capabilities()
+      ]);
       setConfig(nextConfig);
+      setCapabilities({
+        sandboxModes: nextCapabilities.sandboxModes,
+        sandboxAvailable: nextCapabilities.sandbox.available
+      });
       setSessions(nextSessions.sessions);
       setWorkspace((current) => current || nextConfig.workspace);
       const id =
@@ -98,7 +113,13 @@ export function App() {
   const createSession = async (mode: Mode) => {
     try {
       setCreating(true);
-      const created = await api.createSession({ workspace, mode });
+      const effectiveSandbox =
+        mode === "fun" && sandboxMode === "auto-review" ? "enabled" : sandboxMode;
+      const created = await api.createSession({
+        workspace,
+        mode,
+        sandboxMode: effectiveSandbox
+      });
       const next = await api.sessions();
       setSessions(next.sessions);
       setSelectedId(created.session.id);
@@ -196,7 +217,17 @@ export function App() {
             onSessionsChanged={refresh}
           />
         ) : (
-          <EmptyRoom workspace={workspace} setWorkspace={setWorkspace} create={createSession} creating={creating} onCreateMode={createSession} />
+          <EmptyRoom
+            workspace={workspace}
+            setWorkspace={setWorkspace}
+            sandboxMode={sandboxMode}
+            setSandboxMode={setSandboxMode}
+            sandboxModes={capabilities?.sandboxModes ?? [...SANDBOX_MODES]}
+            sandboxAvailable={capabilities?.sandboxAvailable ?? true}
+            create={createSession}
+            creating={creating}
+            onCreateMode={createSession}
+          />
         )}
       </main>
       {error && (
@@ -211,11 +242,19 @@ export function App() {
 function EmptyRoom({
   workspace,
   setWorkspace,
+  sandboxMode,
+  setSandboxMode,
+  sandboxModes,
+  sandboxAvailable,
   creating,
   onCreateMode
 }: {
   workspace: string;
   setWorkspace: (value: string) => void;
+  sandboxMode: SandboxMode;
+  setSandboxMode: (value: SandboxMode) => void;
+  sandboxModes: SandboxMode[];
+  sandboxAvailable: boolean;
   create: (mode: Mode) => void;
   creating: boolean;
   onCreateMode: (mode: Mode) => void;
@@ -231,6 +270,23 @@ function EmptyRoom({
       <div className="launch-card">
         <label htmlFor="workspace">Workspace path</label>
         <input id="workspace" value={workspace} onChange={(event) => setWorkspace(event.target.value)} />
+        <label htmlFor="sandbox">Shell isolation</label>
+        <select
+          id="sandbox"
+          value={sandboxMode}
+          onChange={(event) => setSandboxMode(event.target.value as SandboxMode)}
+        >
+          {sandboxModes.map((value) => (
+            <option key={value} value={value}>
+              {sandboxModeLabel(value)}
+            </option>
+          ))}
+        </select>
+        {!sandboxAvailable && (
+          <small className="sandbox-unavailable">
+            Bubblewrap cannot start on this host. Enabled sessions will fail closed.
+          </small>
+        )}
         <div className="launch-actions">
           <button disabled={creating} className="primary" onClick={() => onCreateMode("productive")}>
             Start productive
@@ -278,12 +334,22 @@ function Workspace({
     }
   };
 
+  const switchSandbox = async (sandbox: SandboxMode) => {
+    try {
+      await api.updateSession(session.id, { sandboxMode: sandbox });
+      await onSessionsChanged();
+    } catch (cause) {
+      onError(cause instanceof Error ? cause.message : String(cause));
+    }
+  };
+
   return (
     <div className="workspace">
       <header className="workspace-header">
         <div>
           <p className="eyebrow">Session / {session.mode}</p>
           <h1>{session.title}</h1>
+          <small className="sandbox-readout">{sandboxModeLabel(session.sandboxMode)}</small>
         </div>
         <div className="workspace-actions">
           <div className="mode-control">
@@ -294,6 +360,17 @@ function Workspace({
               Fun
             </button>
           </div>
+          <select
+            className="sandbox-control"
+            aria-label="Sandbox mode"
+            value={session.sandboxMode}
+            disabled={["queued", "running", "awaiting_consensus"].includes(session.status)}
+            onChange={(event) => void switchSandbox(event.target.value as SandboxMode)}
+          >
+            <option value="enabled">Sandbox enabled</option>
+            <option value="disabled">Sandbox disabled</option>
+            {session.mode === "productive" && <option value="auto-review">Auto review</option>}
+          </select>
           <button className="icon-action" onClick={() => void control("pause")}>
             Pause
           </button>
@@ -726,4 +803,10 @@ function statusSummary(role: Role, status?: string): string {
   if (role === "oracle") return "Ready to decide.";
   if (role === "executor") return "Ready for the work order.";
   return "Ready to talk.";
+}
+
+function sandboxModeLabel(mode: SandboxMode): string {
+  if (mode === "auto-review") return "Auto review: Oracle checks each shell command";
+  if (mode === "enabled") return "Sandbox enabled: Bubblewrap isolates shell commands";
+  return "Sandbox disabled: shell commands run without process isolation";
 }

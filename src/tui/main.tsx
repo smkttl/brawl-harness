@@ -126,7 +126,9 @@ function App({ client, initialSessionId }: Props) {
   return (
     <Box flexDirection="column" paddingX={1}>
       <Box justifyContent="space-between">
-        <Text bold>BRAWL / {detail.session.mode.toUpperCase()}</Text>
+        <Text bold>
+          BRAWL / {detail.session.mode.toUpperCase()} / SANDBOX {detail.session.sandboxMode.toUpperCase()}
+        </Text>
         <Text color={statusColor(detail.session.status)}>{detail.session.status}</Text>
       </Box>
       <Text dimColor>{detail.session.title}</Text>

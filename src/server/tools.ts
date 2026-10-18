@@ -12,6 +12,7 @@ import {
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import type { ToolName } from "../shared/protocol.js";
 import { BrawlError } from "../shared/errors.js";
+import { BubblewrapSandbox } from "./sandbox.js";
 
 export interface ToolResult {
   ok: boolean;
@@ -22,10 +23,16 @@ export interface ToolResult {
 export class WorkspaceTools {
   readonly root: string;
   private readonly timeoutMs: number;
+  private readonly sandbox: "enabled" | "disabled" | null;
 
-  constructor(root: string, timeoutMs: number) {
+  constructor(
+    root: string,
+    timeoutMs: number,
+    sandbox: "enabled" | "disabled" | null = null
+  ) {
     this.root = resolve(root);
     this.timeoutMs = timeoutMs;
+    this.sandbox = sandbox;
   }
 
   async execute(
@@ -172,18 +179,29 @@ export class WorkspaceTools {
     this.checkSignal(signal);
     const command = requiredString(args.command, "command");
     const timeoutMs = boundedInteger(args.timeoutMs, this.timeoutMs, 1_000, this.timeoutMs);
-    const result = await runProcess(
-      "/bin/bash",
-      ["-lc", command],
-      this.root,
-      timeoutMs,
-      signal
-    );
-    const output = [result.stdout, result.stderr].filter(Boolean).join("\n").slice(0, 100_000);
+    if (this.sandbox === "enabled") {
+      const result = await new BubblewrapSandbox(this.root, this.timeoutMs).run(
+        command,
+        timeoutMs,
+        signal
+      );
+      return this.shellResult(result.stdout, result.stderr, result.code, result.timedOut);
+    }
+    const result = await runProcess("/bin/bash", ["-lc", command], this.root, timeoutMs, signal);
+    return this.shellResult(result.stdout, result.stderr, result.code, result.timedOut);
+  }
+
+  private async shellResult(
+    stdout: string,
+    stderr: string,
+    code: number | null,
+    timedOut: boolean
+  ): Promise<ToolResult> {
+    const output = [stdout, stderr].filter(Boolean).join("\n").slice(0, 100_000);
     return {
-      ok: result.code === 0,
-      output: output || `(no output; exit ${result.code ?? "signal"})`,
-      data: { exitCode: result.code, timedOut: result.timedOut }
+      ok: code === 0,
+      output: output || `(no output; exit ${code ?? "signal"})`,
+      data: { exitCode: code, timedOut }
     };
   }
 

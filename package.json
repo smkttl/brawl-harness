@@ -18,7 +18,8 @@
     "typecheck": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.web.json --noEmit",
     "lint": "eslint .",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "sandbox:probe": "bash scripts/probe-bwrap.sh"
   },
   "engines": {
     "node": ">=24"

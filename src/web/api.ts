@@ -6,6 +6,7 @@ import type {
   PublicHarnessConfig,
   PublicProviderConfig,
   Role,
+  SandboxMode,
   Session,
   SessionDetail,
   StreamEnvelope
@@ -47,6 +48,12 @@ export const api = {
     request<{
       efforts: string[];
       providers: string[];
+      sandboxModes: SandboxMode[];
+      sandbox: {
+        available: boolean;
+        version: string | null;
+        error: string | null;
+      };
       workspace: string;
     }>("/api/capabilities"),
   sessions: () => request<{ sessions: Session[] }>("/api/sessions"),
@@ -65,7 +72,10 @@ export const api = {
     }),
   pause: (id: string) => request<{ ok: true }>(`/api/sessions/${id}/pause`, { method: "POST" }),
   resume: (id: string) => request<{ ok: true }>(`/api/sessions/${id}/resume`, { method: "POST" }),
-  updateSession: (id: string, input: Partial<Pick<Session, "mode" | "title">>) =>
+  updateSession: (
+    id: string,
+    input: Partial<Pick<Session, "mode" | "sandboxMode" | "title">>
+  ) =>
     request<Session>(`/api/sessions/${id}`, {
       method: "PATCH",
       body: JSON.stringify(input)

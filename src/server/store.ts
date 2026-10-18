@@ -6,6 +6,7 @@ import type {
   ActionProposal,
   AgentState,
   Role,
+  SandboxMode,
   Session,
   SessionDetail,
   SessionStatus,
@@ -103,6 +104,20 @@ export class Store {
         created_at TEXT NOT NULL
       );
     `);
+    const sessionColumns = this.db.prepare("PRAGMA table_info(sessions)").all() as Row[];
+    if (!sessionColumns.some((column) => column.name === "sandbox_mode")) {
+      this.db.exec(
+        "ALTER TABLE sessions ADD COLUMN sandbox_mode TEXT NOT NULL DEFAULT 'enabled'"
+      );
+    }
+    this.db.exec(
+      "UPDATE sessions SET sandbox_mode='enabled' " +
+        "WHERE mode='fun' AND sandbox_mode='auto-review'"
+    );
+    this.db.exec(
+      "UPDATE sessions SET sandbox_mode='enabled' " +
+        "WHERE sandbox_mode NOT IN ('enabled', 'disabled', 'auto-review')"
+    );
   }
 
   close(): void {
@@ -112,6 +127,7 @@ export class Store {
   createSession(input: {
     title: string;
     mode: Session["mode"];
+    sandboxMode: Session["sandboxMode"];
     workspace: string;
   }): Session {
     const now = new Date().toISOString();
@@ -119,6 +135,7 @@ export class Store {
       id: randomUUID(),
       title: input.title,
       mode: input.mode,
+      sandboxMode: input.sandboxMode,
       status: "idle",
       workspace: input.workspace,
       activeWorkOrderId: null,
@@ -130,13 +147,14 @@ export class Store {
     this.db
       .prepare(
         `INSERT INTO sessions
-         (id, title, mode, status, workspace, active_work_order_id, failure, last_seq, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+         (id, title, mode, sandbox_mode, status, workspace, active_work_order_id, failure, last_seq, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         session.id,
         session.title,
         session.mode,
+        session.sandboxMode,
         session.status,
         session.workspace,
         null,
@@ -179,7 +197,7 @@ export class Store {
     };
   }
 
-  updateSession(id: string, patch: Partial<Pick<Session, "title" | "mode" | "status" | "activeWorkOrderId" | "failure">>): Session {
+  updateSession(id: string, patch: Partial<Pick<Session, "title" | "mode" | "sandboxMode" | "status" | "activeWorkOrderId" | "failure">>): Session {
     const current = this.getSession(id);
     if (!current) throw new Error(`Unknown session ${id}`);
     const next = {
@@ -189,12 +207,13 @@ export class Store {
     };
     this.db
       .prepare(
-        `UPDATE sessions SET title=?, mode=?, status=?, active_work_order_id=?, failure=?, updated_at=?
+        `UPDATE sessions SET title=?, mode=?, sandbox_mode=?, status=?, active_work_order_id=?, failure=?, updated_at=?
          WHERE id=?`
       )
       .run(
         next.title,
         next.mode,
+        next.sandboxMode,
         next.status,
         next.activeWorkOrderId,
         next.failure,
@@ -550,6 +569,7 @@ function mapSession(row: Row): Session {
     id: String(row.id),
     title: String(row.title),
     mode: String(row.mode) as Session["mode"],
+    sandboxMode: sandboxMode(row.sandbox_mode),
     status: String(row.status) as SessionStatus,
     workspace: String(row.workspace),
     activeWorkOrderId: row.active_work_order_id ? String(row.active_work_order_id) : null,
@@ -558,6 +578,10 @@ function mapSession(row: Row): Session {
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at)
   };
+}
+
+function sandboxMode(value: unknown): SandboxMode {
+  return value === "disabled" || value === "auto-review" ? value : "enabled";
 }
 
 function mapEvent(row: Row): TranscriptEvent {

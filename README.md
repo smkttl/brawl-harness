@@ -4,12 +4,13 @@ Brawl Harness is a local three-agent coding room. **Oracle** decides and reviews
 
 ## Quick start
 
-Requirements: Node.js 24 or newer and an OpenAI-compatible provider.
+Requirements: Node.js 24 or newer, Bubblewrap (`bwrap`), unprivileged user and network namespace support, and an OpenAI-compatible provider.
 
 ```bash
 npm install
 cp .env.example .env
 export BRAWL_API_TOKEN="choose-a-local-token"
+npm run sandbox:probe
 npm run dev
 ```
 
@@ -59,7 +60,15 @@ Conversation view shows user-facing messages and progress. Transcript view inclu
 
 Providers support OpenAI-compatible Chat Completions (`chat`) and Responses (`responses`) endpoints. Each provider may use a stored key or an environment variable such as `OPENAI_API_KEY`; secrets are written with restrictive permissions and are redacted from API responses. Each role independently selects its provider, model ID, and reasoning effort. Custom headers are kept server-side.
 
-The configured workspace is trusted local execution under the current OS user. File tools reject paths outside it, inspect writes before approval, guard against stale-file overwrites, and apply shell timeouts. Do not point the harness at a workspace containing secrets unless the configured providers and local account are trusted.
+## Sandbox
+
+Each session stores its sandbox mode for the whole run:
+
+- **Enabled** runs `shell_exec` in Bubblewrap. It exposes read-only `/usr`, `/lib`, and `/lib64`, mounts the workspace read-write at `/workspace`, and creates private `/tmp`, `/proc`, `/dev`, and network namespaces. The environment is cleared, provider credentials are not inherited, and `sudo` cannot escalate.
+- **Disabled** bypasses process isolation only. Workspace file tools still reject absolute paths, `..` escapes, and symlink escapes.
+- **Auto review** is productive-mode only. Before each `shell_exec`, an ephemeral Oracle call receives visible session context, the active work order, the exact command, timeout, and sandbox mode, then returns `{"allow": boolean, "reason": string}`. It has no role history or tools. Successful reviews leave no trace; refusals deny the command and are recorded as a failed Executor tool result.
+
+Do not expose host home directories, system configuration, `/var`, sockets, credentials, or privilege tools through additional Bubblewrap mounts. The backend fails closed if Bubblewrap is unavailable or a sandbox process cannot start.
 
 ## Development
 

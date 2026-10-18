@@ -4,6 +4,7 @@ import type {
   Role,
   Session,
   SessionDetail,
+  SandboxMode,
   StreamEnvelope
 } from "../shared/protocol.js";
 import { createSseParser } from "../shared/stream.js";
@@ -67,6 +68,13 @@ export class HarnessClient {
     await this.request(`/api/sessions/${id}`, {
       method: "PATCH",
       body: JSON.stringify({ mode })
+    });
+  }
+
+  async updateSandboxMode(id: string, sandboxMode: SandboxMode): Promise<Session> {
+    return this.request<Session>(`/api/sessions/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ sandboxMode })
     });
   }
 

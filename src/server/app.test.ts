@@ -618,4 +618,59 @@ describe("backend", () => {
       context.store.close();
     }
   });
+
+  it("defaults sandbox mode and rejects invalid mode combinations or running changes", async () => {
+    const fixture = await makeHarnessFixture();
+    const { app, context } = await buildApp(
+      resolveRuntime({
+        dataDir: fixture.dataDir,
+        workspace: fixture.workspace,
+        apiToken: "secret",
+        authDisabled: false
+      })
+    );
+    const headers = { authorization: "Bearer secret" };
+    try {
+      const created = (
+        await app.inject({
+          method: "POST",
+          url: "/api/sessions",
+          headers,
+          payload: { mode: "productive", workspace: fixture.workspace }
+        })
+      ).json();
+      const id = created.session.id as string;
+      expect(created.session.sandboxMode).toBe("enabled");
+
+      const invalid = await app.inject({
+        method: "PATCH",
+        url: `/api/sessions/${id}`,
+        headers,
+        payload: { mode: "fun", sandboxMode: "auto-review" }
+      });
+      expect(invalid.statusCode).toBe(400);
+
+      vi.spyOn(context.scheduler, "isRunning").mockReturnValue(true);
+      const running = await app.inject({
+        method: "PATCH",
+        url: `/api/sessions/${id}`,
+        headers,
+        payload: { sandboxMode: "disabled" }
+      });
+      expect(running.statusCode).toBe(409);
+
+      vi.restoreAllMocks();
+      const changed = await app.inject({
+        method: "PATCH",
+        url: `/api/sessions/${id}`,
+        headers,
+        payload: { sandboxMode: "auto-review" }
+      });
+      expect(changed.statusCode).toBe(200);
+      expect(changed.json().sandboxMode).toBe("auto-review");
+    } finally {
+      await app.close();
+      context.store.close();
+    }
+  });
 });

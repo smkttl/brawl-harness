@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { Command } from "commander";
 import { resolveRuntime } from "./server/config.js";
 import { HarnessClient } from "./client/api.js";
-import type { Mode } from "./shared/protocol.js";
+import type { Mode, SandboxMode } from "./shared/protocol.js";
 
 const program = new Command()
   .name("brawl")
@@ -91,12 +91,17 @@ program
   .command("chat")
   .argument("[message...]", "opening message")
   .option("--mode <mode>", "productive or fun", "productive")
+  .option("--sandbox <mode>", "enabled, disabled, or auto-review", "enabled")
   .option("--workspace <path>", "workspace", process.cwd())
   .option("--url <url>", "backend URL", "http://127.0.0.1:8787")
-  .action(async (words: string[], options: { mode: Mode; workspace: string; url: string }) => {
+  .action(async (
+    words: string[],
+    options: { mode: Mode; sandbox: SandboxMode; workspace: string; url: string }
+  ) => {
     const client = new HarnessClient({ baseUrl: options.url, token: accessToken() });
     const detail = await client.createSession({
       mode: options.mode,
+      sandboxMode: options.sandbox,
       workspace: resolve(options.workspace)
     });
     if (words.length) await client.send(detail.session.id, words.join(" "));
@@ -109,7 +114,10 @@ program
   .action(async (options: { url: string }) => {
     const client = new HarnessClient({ baseUrl: options.url, token: accessToken() });
     for (const session of await client.sessions()) {
-      console.log(`${session.id}  ${session.status.padEnd(18)} ${session.mode.padEnd(10)} ${session.title}`);
+      console.log(
+        `${session.id}  ${session.status.padEnd(18)} ${session.mode.padEnd(10)} ` +
+          `${session.sandboxMode.padEnd(12)} ${session.title}`
+      );
     }
   });
 

@@ -4,6 +4,9 @@ export type Role = (typeof ROLES)[number];
 export const MODES = ["productive", "fun"] as const;
 export type Mode = (typeof MODES)[number];
 
+export const SANDBOX_MODES = ["enabled", "disabled", "auto-review"] as const;
+export type SandboxMode = (typeof SANDBOX_MODES)[number];
+
 export const PROVIDER_KINDS = ["chat", "responses"] as const;
 export type ProviderKind = (typeof PROVIDER_KINDS)[number];
 
@@ -136,6 +139,7 @@ export interface Session {
   id: string;
   title: string;
   mode: Mode;
+  sandboxMode: SandboxMode;
   status: SessionStatus;
   workspace: string;
   activeWorkOrderId: string | null;
@@ -165,6 +169,7 @@ export interface SessionDetail {
 export interface CreateSessionInput {
   title?: string;
   mode?: Mode;
+  sandboxMode?: SandboxMode;
   workspace: string;
 }
 

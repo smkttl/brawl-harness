@@ -6,6 +6,7 @@ import { z } from "zod";
 import { BrawlError } from "../shared/errors.js";
 import {
   MODES,
+  SANDBOX_MODES,
   PROVIDER_KINDS,
   REASONING_EFFORTS,
   ROLES,
@@ -22,6 +23,7 @@ import { ConfigStore, redactProvider, type RuntimeOptions } from "./config.js";
 import { SessionEvents } from "./events.js";
 import { discoverModels, supportedEfforts } from "./provider.js";
 import { Scheduler } from "./scheduler.js";
+import { inspectBubblewrap } from "./sandbox.js";
 import { Store } from "./store.js";
 
 export interface AppContext {
@@ -77,11 +79,16 @@ export async function buildApp(runtime: RuntimeOptions, opts: { logger?: boolean
 
   app.get("/health", async () => ({ ok: true }));
   app.get("/api/config", async () => configStore.publicView());
-  app.get("/api/capabilities", async () => ({
-    efforts: supportedEfforts(),
-    providers: PROVIDER_KINDS,
-    workspace: runtime.workspace
-  }));
+  app.get("/api/capabilities", async () => {
+    const bubblewrap = await inspectBubblewrap();
+    return {
+      efforts: supportedEfforts(),
+      providers: PROVIDER_KINDS,
+      sandboxModes: SANDBOX_MODES,
+      sandbox: bubblewrap,
+      workspace: runtime.workspace
+    };
+  });
 
   app.post("/api/providers", async (request) => {
     const draft = providerSchema.parse(request.body) as ProviderDraft;
@@ -159,9 +166,14 @@ export async function buildApp(runtime: RuntimeOptions, opts: { logger?: boolean
   app.get("/api/sessions", async () => ({ sessions: store.listSessions() }));
   app.post("/api/sessions", async (request) => {
     const input = sessionSchema.parse(request.body) as CreateSessionInput;
+    const mode = input.mode ?? "productive";
+    if (mode === "fun" && input.sandboxMode === "auto-review") {
+      throw new BrawlError("auto-review sandbox mode is only available in productive mode");
+    }
     const session = store.createSession({
       title: input.title || "New session",
-      mode: input.mode ?? "productive",
+      mode,
+      sandboxMode: input.sandboxMode ?? "enabled",
       workspace: input.workspace || runtime.workspace
     });
     return store.sessionDetail(session.id);
@@ -205,13 +217,25 @@ export async function buildApp(runtime: RuntimeOptions, opts: { logger?: boolean
   app.patch("/api/sessions/:id", async (request) => {
     const { id } = request.params as { id: string };
     const input = z
-      .object({ mode: z.enum(MODES).optional(), title: z.string().min(1).max(120).optional() })
+      .object({
+        mode: z.enum(MODES).optional(),
+        sandboxMode: z.enum(SANDBOX_MODES).optional(),
+        title: z.string().min(1).max(120).optional()
+      })
       .parse(request.body);
     const session = store.getSession(id);
     if (!session) throw new BrawlError("Session not found", 404);
-    if (scheduler.isRunning(id)) throw new BrawlError("Pause before changing mode", 409);
-    const patch: Partial<Pick<Session, "mode" | "title">> = {};
+    if (scheduler.isRunning(id)) {
+      throw new BrawlError("Pause before changing mode or sandbox settings", 409);
+    }
+    const nextMode = input.mode ?? session.mode;
+    const nextSandboxMode = input.sandboxMode ?? session.sandboxMode;
+    if (nextMode === "fun" && nextSandboxMode === "auto-review") {
+      throw new BrawlError("auto-review sandbox mode is only available in productive mode");
+    }
+    const patch: Partial<Pick<Session, "mode" | "sandboxMode" | "title">> = {};
     if (input.mode !== undefined) patch.mode = input.mode;
+    if (input.sandboxMode !== undefined) patch.sandboxMode = input.sandboxMode;
     if (input.title !== undefined) patch.title = input.title;
     const next = store.updateSession(id, patch);
     store.appendEvent({
@@ -295,6 +319,7 @@ const limitsSchema = z.object({
 const sessionSchema = z.object({
   title: z.string().max(120).optional(),
   mode: z.enum(MODES).optional(),
+  sandboxMode: z.enum(SANDBOX_MODES).optional(),
   workspace: z.string().min(1)
 });
 

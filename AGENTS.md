@@ -14,12 +14,22 @@
 - Speaker is the only role that receives user messages and produces user-facing summaries. It uses `ask_user` for material ambiguity.
 - Any role may use `send_steer`; steering is queued and delivered at the recipient's next model boundary.
 - Never expose provider credentials or raw chain-of-thought. Transcript events may contain provider-safe summaries, usage, tool calls/results, and visible messages only.
+- The sandbox mode is fixed for the duration of a running session. `enabled` and productive-mode `auto-review` must fail closed when Bubblewrap cannot execute.
 
 ## Mode behavior
 
 - Productive mode follows Oracle -> Executor -> Oracle review -> Speaker summary.
 - Fun mode uses competitive/quarrelsome prompts. Executor proposals are immutable and require explicit rationale-backed votes from all three roles. After a complete non-unanimous vote, Executor gets one evidence-based rebuttal turn and each denier may retain or revise their vote. No workspace action executes without unanimous approval.
 - Incomplete voting pauses at `awaiting_user`; exhausted debate asks Speaker to explain the deadlock. Do not silently turn a missing vote into a rejection.
+
+## Sandbox behavior
+
+- `enabled` runs only `shell_exec` through Bubblewrap with private user, mount, PID, IPC, UTS, cgroup, and network namespaces.
+- Expose only a read-only minimal runtime (`/usr`, `/lib`, `/lib64`), a writable workspace at `/workspace`, and private `/tmp`, `/proc`, and `/dev`. Never expose host `/home`, `/root`, `/etc`, `/var`, credentials, or the Docker socket.
+- `disabled` bypasses process isolation only. Workspace file tools must remain inside the configured workspace.
+- `auto-review` is available only in productive mode and applies only to `shell_exec`. It calls Oracle with visible session/work-order context and no actor history or tools.
+- Successful auto-reviews leave no transcript or history event. Refusals, malformed responses, provider failures, missing reasons, and timeouts deny safely and record only a failed Executor `tool_result` with `sandboxReview: "refused"`.
+- Do not use a binary-presence check as the readiness signal. Run the host probe at `scripts/probe-bwrap.sh` and fail closed if the real Bubblewrap process cannot start.
 
 ## Persistence and lifecycle
 
