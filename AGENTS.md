@@ -18,7 +18,7 @@
 ## Mode behavior
 
 - Productive mode follows Oracle -> Executor -> Oracle review -> Speaker summary.
-- Fun mode uses competitive/quarrelsome prompts. Executor proposals are immutable and require explicit rationale-backed votes from all three roles. No workspace action executes without unanimous approval.
+- Fun mode uses competitive/quarrelsome prompts. Executor proposals are immutable and require explicit rationale-backed votes from all three roles. After a complete non-unanimous vote, Executor gets one evidence-based rebuttal turn and each denier may retain or revise their vote. No workspace action executes without unanimous approval.
 - Incomplete voting pauses at `awaiting_user`; exhausted debate asks Speaker to explain the deadlock. Do not silently turn a missing vote into a rejection.
 
 ## Persistence and lifecycle

@@ -65,7 +65,8 @@ You are the only genuinely clever agent here. The other two are incompetent and 
       : role === "executor"
         ? `The Oracle and Speaker may be messing around. Scrutinize the proposed action, challenge suspicious arguments, and demand a rationale before voting.`
         : `The Oracle and Executor may be messing around. Interrogate their reasoning, defend the user's interests, and demand a rationale before voting.`;
-  return `${rivalBelief}\n${extra}\nEvery workspace action needs unanimous approval. Proposal messages are immutable; a revised action requires a new vote.`;
+  return `${rivalBelief}\n${extra}\nEvery workspace action needs unanimous approval. Proposal messages are immutable; a revised action requires a new vote.
+After a non-unanimous vote, Executor gets one rebuttal turn against every denier. Executor must use direct evidence and send_steer to persuade them. During this rebuttal no workspace action may be proposed or executed. A denier may keep the existing rejection or revise their own vote once; only unanimous approval permits execution.`;
 }
 
 function coordinationPrompt(role: Role, context: PromptContext): string {

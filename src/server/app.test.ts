@@ -286,10 +286,32 @@ describe("backend", () => {
         headers,
         payload: { content: "Read the README." }
       });
-      await waitFor(() => context.store.getSession(id)?.status === "idle", 5_000);
+      try {
+        await waitFor(() => context.store.getSession(id)?.status === "idle", 5_000);
+      } catch {
+        throw new Error(
+          JSON.stringify({
+            session: context.store.getSession(id),
+            agents: context.store.agentStates(id),
+            events: context.store.events(id).map((event) => ({
+              role: event.role,
+              type: event.type,
+              seq: event.seq,
+              content: event.content.slice(0, 300),
+              data: event.data
+            }))
+          })
+        );
+      }
       const detail = context.store.sessionDetail(id)!;
       const proposalEvent = detail.events.find((event) => event.type === "proposal");
-      const proposalId = (proposalEvent?.data?.proposal as { id?: string } | undefined)?.id;
+      const proposal =
+        proposalEvent?.data?.proposal &&
+        typeof proposalEvent.data.proposal === "object" &&
+        "id" in proposalEvent.data.proposal
+          ? (proposalEvent.data.proposal as { id?: string })
+          : undefined;
+      const proposalId = proposal?.id;
       expect(proposalId).toBeTruthy();
       expect(context.store.getProposal(proposalId!)?.status).toBe("executed");
       expect(detail.events.filter((event) => event.type === "vote")).toHaveLength(3);
@@ -298,6 +320,174 @@ describe("backend", () => {
       expect(detail.events.some((event) => event.type === "tool_result" && event.content.includes("Fixture"))).toBe(true);
     } finally {
       context.scheduler.stop((context.store.listSessions()[0]?.id) ?? "");
+      await app.close();
+      context.store.close();
+    }
+  });
+
+  it("lets Executor persuade a denier to revise a fun-mode vote", async () => {
+    const fixture = await makeHarnessFixture();
+    let oracleCalls = 0;
+    let executorCalls = 0;
+    const initialVoters = new Set<string>();
+    const originalResponder = (role: string) => {
+      if (role === "oracle" && oracleCalls++ === 0) {
+        return [
+          chatReply({
+            calls: [
+              {
+                name: "submit_work_order",
+                arguments: {
+                  objective: "Inspect README",
+                  constraints: [],
+                  acceptanceCriteria: ["Report content"]
+                }
+              }
+            ]
+          })
+        ];
+      }
+      if (role === "executor" && executorCalls++ === 0) {
+        return [
+          chatReply({
+            calls: [{ name: "workspace_read", arguments: { path: "README.md" } }]
+          }),
+          chatReply({ text: "Read action proposed." })
+        ];
+      }
+      return [chatReply({ text: "Continuing with the recorded decision." })];
+    };
+    globalThis.fetch = mockFetch((role, body) => {
+      const serialized = JSON.stringify(body.messages);
+      const proposalId = serialized.match(/proposal ([0-9a-f-]{36})/)?.[1];
+      const isInitialVote =
+        serialized.includes("Fun-mode deliberation for proposal") &&
+        !serialized.includes("Fun-mode rebuttal for proposal") &&
+        !serialized.includes("Fun-mode vote response for proposal") &&
+        !initialVoters.has(role);
+      if (isInitialVote) {
+        if (!proposalId) throw new Error("Proposal id missing from deliberation prompt");
+        initialVoters.add(role);
+        return [
+          chatReply({
+            calls: [
+              {
+                name: "cast_vote",
+                arguments: {
+                  proposalId,
+                  vote: role === "speaker" ? "reject" : "approve",
+                  rationale:
+                    role === "speaker"
+                      ? "The read has not explained why it is necessary."
+                      : `${role} approves the read-only action.`
+                }
+              }
+            ]
+          })
+        ];
+      }
+      if (
+        role === "executor" &&
+        serialized.includes("Fun-mode rebuttal for proposal") &&
+        !serialized.includes("Workspace actions are unavailable during the fun-mode rebuttal")
+      ) {
+        return [
+          chatReply({
+            calls: [{ name: "workspace_read", arguments: { path: "README.md" } }]
+          }),
+          chatReply({
+            calls: [
+              {
+                name: "send_steer",
+                arguments: {
+                  to: "speaker",
+                  content: "The read is necessary to verify the documented behavior before editing."
+                }
+              }
+            ]
+          }),
+          chatReply({ text: "My case is in the evidence and the steering message." })
+        ];
+      }
+      if (
+        role === "speaker" &&
+        serialized.includes("Fun-mode vote response for proposal") &&
+        !serialized.includes("Tool cast_vote result is above. Continue.")
+      ) {
+        if (!proposalId) throw new Error("Proposal id missing from vote response prompt");
+        return [
+          chatReply({
+            calls: [
+              {
+                name: "cast_vote",
+                arguments: {
+                  proposalId,
+                  vote: "approve",
+                  rationale: "Executor explained why the read is necessary for verification."
+                }
+              }
+            ]
+          })
+        ];
+      }
+      return originalResponder(role);
+    });
+    const { app, context } = await buildApp(
+      resolveRuntime({
+        dataDir: fixture.dataDir,
+        workspace: fixture.workspace,
+        apiToken: "secret",
+        authDisabled: false
+      })
+    );
+    const headers = { authorization: "Bearer secret" };
+    try {
+      const created = (
+        await app.inject({
+          method: "POST",
+          url: "/api/sessions",
+          headers,
+          payload: { mode: "fun", workspace: fixture.workspace }
+        })
+      ).json();
+      const id = created.session.id as string;
+      await app.inject({
+        method: "POST",
+        url: `/api/sessions/${id}/messages`,
+        headers,
+        payload: { content: "Read the README." }
+      });
+      await waitFor(
+        () => context.store.events(id).some((event) => event.type === "tool_result"),
+        5_000
+      );
+
+      const detail = context.store.sessionDetail(id)!;
+      const votes = detail.events.filter((event) => event.type === "vote");
+      const proposalId = votes
+        .map((event) => event.data?.proposalId)
+        .find((value): value is string => typeof value === "string");
+      const rebuttal = detail.events.find((event) =>
+        event.content.includes("Executor gets a rebuttal in proposal round 1/2")
+      );
+      const revisedVote = votes.find((event) => event.content.startsWith("revised approve:"));
+
+      expect(context.store.getProposal(proposalId!)?.status).toBe("executed");
+      expect(rebuttal).toBeTruthy();
+      expect(revisedVote?.role).toBe("speaker");
+      expect(rebuttal!.seq).toBeLessThan(revisedVote!.seq);
+      expect(
+        detail.events.some(
+          (event) =>
+            event.role === "executor" &&
+            event.type === "steer" &&
+            event.content.includes("verify the documented behavior")
+        )
+      ).toBe(true);
+      expect(detail.events.some((event) => event.content.includes("moved to debate round 2"))).toBe(false);
+      expect(detail.events.filter((event) => event.type === "tool_call")).toHaveLength(1);
+    } finally {
+      context.scheduler.stop(context.store.listSessions()[0]?.id ?? "");
       await app.close();
       context.store.close();
     }
@@ -382,7 +572,13 @@ describe("backend", () => {
       await waitFor(() => context.store.getSession(id)?.status === "awaiting_user", 5_000);
       const detail = context.store.sessionDetail(id)!;
       expect(detail.events.filter((event) => event.type === "vote")).toHaveLength(6);
+      expect(
+        detail.events.filter((event) =>
+          event.content.includes("Executor gets a rebuttal in proposal round")
+        )
+      ).toHaveLength(2);
       expect(detail.events.some((event) => event.role === "speaker" && event.content.includes("could not agree"))).toBe(true);
+      expect(detail.events.filter((event) => event.type === "tool_call")).toHaveLength(0);
       expect(detail.activeProposal).toBeNull();
       expect(detail.workOrders[0]?.status).toBe("active");
     } finally {

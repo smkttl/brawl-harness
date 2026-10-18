@@ -49,7 +49,7 @@ Speaker resolves material ambiguity and relays user context. Oracle records a pl
 
 ### Fun
 
-Prompts make each role competitive and explicitly warn Executor and Speaker that the other agents may be messing around. Executor proposes immutable workspace actions. Every action requires an explicit rationale-backed approval from Oracle, Executor, and Speaker. Missing votes pause the session for guidance; unanimous approval is the only path to execution, and the debate limit rejects unresolved actions.
+Prompts make each role competitive and explicitly warn Executor and Speaker that the other agents may be messing around. Executor proposes immutable workspace actions. Every action requires an explicit rationale-backed approval from Oracle, Executor, and Speaker. After a non-unanimous vote, Executor gets one evidence-based rebuttal turn against the deniers; a denier may retain or revise only their own vote. Missing votes pause the session for guidance; unanimous approval is the only path to execution, and the debate limit rejects unresolved actions after the final rebuttal.
 
 ## Transcript
 

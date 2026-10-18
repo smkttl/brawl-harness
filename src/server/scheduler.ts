@@ -43,6 +43,11 @@ interface UserCommand {
   instruction?: string;
 }
 
+interface DispatchToolOptions {
+  debate?: boolean;
+  voteRevisionDeniers?: Role[];
+}
+
 const ROLES = ["oracle", "executor", "speaker"] as const;
 
 const META_TOOLS: ProviderTool[] = [
@@ -472,7 +477,8 @@ export class Scheduler {
     role: Role,
     runSignal: AbortSignal,
     mode: Mode,
-    instruction: string | null
+    instruction: string | null,
+    options: DispatchToolOptions = {}
   ): Promise<void> {
     const key = `${sessionId}:${role}`;
     if (this.activeTurns.has(key)) throw new BrawlError(`${role} is already active`);
@@ -620,7 +626,15 @@ export class Scheduler {
         }
 
         for (const call of reply.toolCalls) {
-          const result = await this.dispatchTool(sessionId, role, call.name, call.arguments, controller.signal, mode);
+          const result = await this.dispatchTool(
+            sessionId,
+            role,
+            call.name,
+            call.arguments,
+            controller.signal,
+            mode,
+            options
+          );
           actor.history.push({
             role: "tool",
             toolCallId: call.id,
@@ -663,7 +677,8 @@ export class Scheduler {
     name: string,
     rawArgs: string,
     signal: AbortSignal,
-    mode: Mode
+    mode: Mode,
+    options: DispatchToolOptions = {}
   ): Promise<string> {
     let args: Record<string, unknown>;
     try {
@@ -710,18 +725,30 @@ export class Scheduler {
       if (!proposal || proposal.sessionId !== sessionId || proposal.status !== "pending") {
         return JSON.stringify({ ok: false, output: "Proposal is not pending" });
       }
-      if (proposal.votes[role] !== null) {
-        return JSON.stringify({ ok: false, output: "You have already voted in this debate round" });
+      const previousVote = proposal.votes[role];
+      if (previousVote !== null && !options.voteRevisionDeniers?.includes(role)) {
+        return JSON.stringify({
+          ok: false,
+          output: options.debate
+            ? "Only an agent who rejected the proposal may revise its vote"
+            : "You have already voted in this debate round"
+        });
       }
       const vote = args.vote === "approve" ? "approve" : "reject";
       const rationale = String(args.rationale ?? "").trim();
       if (!rationale) return JSON.stringify({ ok: false, output: "Vote rationale is required" });
+      if (vote === previousVote) {
+        return JSON.stringify({
+          ok: true,
+          output: `Your ${vote} vote stands. No revision was needed.`
+        });
+      }
       const updated = this.store.recordVote(proposal.id, role, vote);
       this.emit(sessionId, {
         role,
         type: "vote",
-        content: `${vote}: ${rationale}`,
-        data: { proposalId: proposal.id, vote, rationale }
+        content: `${previousVote === null ? "" : "revised "}${vote}: ${rationale}`,
+        data: { proposalId: proposal.id, vote, rationale, revision: previousVote !== null }
       });
       this.events.publish(sessionId, { type: "proposal", proposal: updated });
       this.publishSession(sessionId);
@@ -735,6 +762,12 @@ export class Scheduler {
       this.emit(sessionId, { role, type: "status", content: "Waiting for the user's answer." });
       this.publishSession(sessionId);
       return JSON.stringify({ ok: true, output: "The session is paused until the user responds" });
+    }
+    if (mode === "fun" && options.debate && isWorkspaceTool(name)) {
+      return JSON.stringify({
+        ok: false,
+        output: "Workspace actions are unavailable during the fun-mode rebuttal"
+      });
     }
     if (role !== "executor" || !isWorkspaceTool(name)) {
       return JSON.stringify({ ok: false, output: `${role} cannot use ${name}` });
@@ -932,6 +965,15 @@ export class Scheduler {
       return "awaiting_user";
     }
 
+    await this.runExecutorRebuttal(sessionId, current, signal, mode);
+
+    const revised = this.store.getProposal(current.id);
+    if (!revised || revised.status !== "pending") return "done";
+    if (Object.values(revised.votes).every((vote) => vote === "approve")) {
+      await this.executeApproved(sessionId, revised, signal);
+      return "continue";
+    }
+
     if (current.round < this.configStore.get().debateRounds) {
       const next = this.store.advanceProposalRound(current.id);
       this.events.publish(sessionId, { type: "proposal", proposal: next });
@@ -957,6 +999,85 @@ export class Scheduler {
     );
     this.publishSession(sessionId);
     return "awaiting_user";
+  }
+
+  private async runExecutorRebuttal(
+    sessionId: string,
+    proposal: ActionProposal,
+    signal: AbortSignal,
+    mode: Mode
+  ): Promise<void> {
+    const deniers = ROLES.filter((role) => proposal.votes[role] === "reject");
+    if (deniers.length === 0) return;
+
+    const rationales = this.voteRationales(sessionId, proposal.id);
+    const denialSummary = deniers
+      .map((role) => `${role}: ${rationales[role] ?? "No rationale was recorded."}`)
+      .join("\n");
+    const maxRounds = this.configStore.get().debateRounds;
+    this.emit(sessionId, {
+      role: "system",
+      type: "status",
+      content:
+        `Executor gets a rebuttal in proposal round ${proposal.round}/${maxRounds} ` +
+        `against ${deniers.join(", ")}.`
+    });
+
+    const debateStart = this.store.events(sessionId).at(-1)?.seq ?? 0;
+    await this.runAgent(
+      sessionId,
+      "executor",
+      signal,
+      mode,
+      `Fun-mode rebuttal for proposal ${proposal.id}, round ${proposal.round}/${maxRounds}. ` +
+        `The following roles rejected the immutable ${proposal.action} proposal:\n${denialSummary}\n` +
+        "Use send_steer to directly persuade each denier with concrete evidence. Do not propose or execute " +
+        "workspace actions during this rebuttal.",
+      { debate: true }
+    );
+    const debateEvents = this.store
+      .events(sessionId)
+      .filter(
+        (event) =>
+          event.seq > debateStart &&
+          event.role === "executor" &&
+          (event.type === "agent_message" || event.type === "steer")
+      )
+      .map((event) => event.content)
+      .join("\n\n")
+      .slice(-8_000);
+
+    await Promise.all(
+      deniers.map((role) =>
+        this.runAgent(
+          sessionId,
+          role,
+          signal,
+          mode,
+          `Fun-mode vote response for proposal ${proposal.id}, round ${proposal.round}/${maxRounds}. ` +
+            `Your rejection reason was: ${rationales[role] ?? "No rationale was recorded."}\n` +
+            `Executor's rebuttal:\n${debateEvents || "Review Executor's steering message before deciding."}\n` +
+            "You may retain your rejection by making no cast_vote call. If Executor's evidence changes your " +
+            "decision, use cast_vote again for this same proposal with your revised vote and rationale. " +
+            "Do not propose or execute workspace actions during this rebuttal.",
+          {
+            debate: true,
+            voteRevisionDeniers: deniers
+          }
+        )
+      )
+    );
+  }
+
+  private voteRationales(sessionId: string, proposalId: string): Partial<Record<Role, string>> {
+    const rationales: Partial<Record<Role, string>> = {};
+    for (const event of this.store.events(sessionId)) {
+      if (event.type !== "vote" || event.role === "system" || event.role === "user") continue;
+      if (event.data?.proposalId !== proposalId) continue;
+      const rationale = event.data?.rationale;
+      if (typeof rationale === "string") rationales[event.role] = rationale;
+    }
+    return rationales;
   }
 
   private anyPendingSteer(sessionId: string): boolean {
