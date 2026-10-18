@@ -27,4 +27,28 @@ describe("WorkspaceTools", () => {
     expect(result.ok).toBe(false);
     expect(await readFile(join(root, "file.txt"), "utf8")).toBe("changed");
   });
+
+  it("prevents an approved create from overwriting a file that appeared later", async () => {
+    const root = await mkdtemp(join(tmpdir(), "brawl-tools-"));
+    const tools = new WorkspaceTools(root, 5_000);
+    const args = await inspectForApproval(tools, "workspace_write", {
+      path: "new.txt",
+      content: "approved"
+    });
+    await writeFile(join(root, "new.txt"), "created elsewhere");
+    const result = await tools.execute("workspace_write", args, new AbortController().signal);
+    expect(result.ok).toBe(false);
+    expect(await readFile(join(root, "new.txt"), "utf8")).toBe("created elsewhere");
+  });
+
+  it("runs shell commands on the host when isolation is disabled", async () => {
+    const root = await mkdtemp(join(tmpdir(), "brawl-tools-"));
+    const tools = new WorkspaceTools(root, 5_000, "disabled");
+    const result = await tools.execute(
+      "shell_exec",
+      { command: "printf disabled-ok" },
+      new AbortController().signal
+    );
+    expect(result).toMatchObject({ ok: true, output: "disabled-ok" });
+  });
 });

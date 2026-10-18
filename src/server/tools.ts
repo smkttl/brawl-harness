@@ -2,10 +2,12 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   mkdir,
+  open,
   readFile,
   readdir,
   realpath,
   rename,
+  rm,
   stat,
   writeFile
 } from "node:fs/promises";
@@ -20,19 +22,24 @@ export interface ToolResult {
   data?: Record<string, unknown>;
 }
 
+type ExpectedState = { expectedSha256: string } | { expectedAbsent: true };
+
 export class WorkspaceTools {
   readonly root: string;
   private readonly timeoutMs: number;
   private readonly sandbox: "enabled" | "disabled" | null;
+  private readonly allowHostExecution: boolean;
 
   constructor(
     root: string,
     timeoutMs: number,
-    sandbox: "enabled" | "disabled" | null = null
+    sandbox: "enabled" | "disabled" | null = null,
+    options: { allowHostExecution?: boolean } = {}
   ) {
     this.root = resolve(root);
     this.timeoutMs = timeoutMs;
     this.sandbox = sandbox;
+    this.allowHostExecution = options.allowHostExecution ?? sandbox !== "enabled";
   }
 
   async execute(
@@ -122,15 +129,30 @@ export class WorkspaceTools {
     this.checkSignal(signal);
     const path = await this.safePath(requiredString(args.path, "path"), true);
     const content = requiredString(args.content, "content", true);
-    const expected = args.expectedSha256 ? String(args.expectedSha256) : null;
+    const expected = expectedState(args);
     const current = await fileHashOrNull(path);
-    if (expected && expected !== current) {
+    if (expected && !matchesExpected(current, expected)) {
       return { ok: false, output: "File changed since approval; create a fresh proposal." };
     }
     await mkdir(dirname(path), { recursive: true });
     const temporary = `${path}.brawl-${process.pid}-${Date.now()}.tmp`;
     await writeFile(temporary, content, { mode: 0o600 });
-    await rename(temporary, path);
+    try {
+      if (expected && "expectedAbsent" in expected) {
+        const handle = await open(path, "wx", 0o600);
+        try {
+          await handle.writeFile(content);
+        } finally {
+          await handle.close();
+        }
+      } else {
+        await rename(temporary, path);
+      }
+    } finally {
+      if (expected && "expectedAbsent" in expected) {
+        await rm(temporary, { force: true });
+      }
+    }
     return {
       ok: true,
       output: `Wrote ${relative(this.root, path)} (${Buffer.byteLength(content)} bytes)`,
@@ -145,12 +167,21 @@ export class WorkspaceTools {
       throw new BrawlError("Patch must use the *** Begin Patch / *** End Patch envelope");
     }
     const expected = Array.isArray(args.expectedHashes)
-      ? (args.expectedHashes as Array<{ path?: string; sha256?: string }>)
+      ? (args.expectedHashes as Array<{
+          path?: string;
+          sha256?: string;
+          absent?: boolean;
+        }>)
       : [];
     for (const item of expected) {
       if (!item.path) continue;
       const path = await this.safePath(item.path);
-      if ((await fileHashOrNull(path)) !== (item.sha256 ?? "")) {
+      const current = await fileHashOrNull(path);
+      if (
+        (item.absent && current !== "") ||
+        (!item.absent && current === "") ||
+        (!item.absent && current !== item.sha256)
+      ) {
         return { ok: false, output: `File changed since approval: ${item.path}` };
       }
     }
@@ -179,13 +210,20 @@ export class WorkspaceTools {
     this.checkSignal(signal);
     const command = requiredString(args.command, "command");
     const timeoutMs = boundedInteger(args.timeoutMs, this.timeoutMs, 1_000, this.timeoutMs);
-    if (this.sandbox === "enabled") {
+    const execution = args.execution === "host" ? "host" : "sandboxed";
+    if (execution === "host" && !this.allowHostExecution) {
+      throw new BrawlError("Host execution requires an approved auto-review");
+    }
+    if (this.sandbox === "enabled" && execution === "sandboxed") {
       const result = await new BubblewrapSandbox(this.root, this.timeoutMs).run(
         command,
         timeoutMs,
         signal
       );
       return this.shellResult(result.stdout, result.stderr, result.code, result.timedOut);
+    }
+    if (this.sandbox === "enabled" && execution === "host") {
+      throw new BrawlError("Host execution is unavailable while the sandbox is enabled");
     }
     const result = await runProcess("/bin/bash", ["-lc", command], this.root, timeoutMs, signal);
     return this.shellResult(result.stdout, result.stderr, result.code, result.timedOut);
@@ -247,15 +285,17 @@ export async function inspectForApproval(
   args: Record<string, unknown>
 ): Promise<Record<string, unknown>> {
   if (action === "workspace_write") {
+    const clean = stripApprovalHints(args);
     const target = String(args.path ?? "");
     try {
       const content = await readFile(resolve(tools.root, target), "utf8");
-      return { ...args, expectedSha256: sha256(content) };
+      return { ...clean, expectedSha256: sha256(content) };
     } catch {
-      return { ...args, expectedSha256: "" };
+      return { ...clean, expectedAbsent: true };
     }
   }
   if (action === "workspace_patch") {
+    const clean = stripApprovalHints(args);
     const paths = [...String(args.patch ?? "").matchAll(/^\*\*\* (?:Update|Add|Delete) File: (.+)$/gm)].map(
       (match) => match[1] as string
     );
@@ -265,12 +305,31 @@ export async function inspectForApproval(
         const content = await readFile(resolve(tools.root, path), "utf8");
         expectedHashes.push({ path, sha256: sha256(content) });
       } catch {
-        expectedHashes.push({ path, sha256: "" });
+        expectedHashes.push({ path, absent: true });
       }
     }
-    return { ...args, expectedHashes };
+    return { ...clean, expectedHashes };
   }
-  return args;
+  return stripApprovalHints(args);
+}
+
+function stripApprovalHints(args: Record<string, unknown>): Record<string, unknown> {
+  const clean = { ...args };
+  delete clean.expectedSha256;
+  delete clean.expectedAbsent;
+  delete clean.expectedHashes;
+  return clean;
+}
+
+function expectedState(args: Record<string, unknown>): ExpectedState | null {
+  if (args.expectedAbsent === true) return { expectedAbsent: true };
+  if (typeof args.expectedSha256 === "string") return { expectedSha256: args.expectedSha256 };
+  return null;
+}
+
+function matchesExpected(current: string, expected: ExpectedState): boolean {
+  if ("expectedAbsent" in expected) return current === "";
+  return current !== "" && current === expected.expectedSha256;
 }
 
 async function runProcess(

@@ -56,6 +56,10 @@ export const api = {
       };
       workspace: string;
     }>("/api/capabilities"),
+  workspaceDirectories: (path: string) =>
+    request<{ path: string; directories: string[] }>(
+      `/api/workspace/directories?path=${encodeURIComponent(path)}`
+    ),
   sessions: () => request<{ sessions: Session[] }>("/api/sessions"),
   session: (id: string) => request<SessionDetail>(`/api/sessions/${id}`),
   createSession: (input: CreateSessionInput) =>

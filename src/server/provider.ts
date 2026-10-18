@@ -7,12 +7,10 @@ import {
 import { BrawlError } from "../shared/errors.js";
 import { createSseParser } from "../shared/stream.js";
 
-export interface ProviderMessage {
-  role: "system" | "user" | "assistant" | "tool";
-  content: string;
-  toolCallId?: string;
-  toolName?: string;
-}
+export type ProviderMessage =
+  | { role: "system" | "user"; content: string }
+  | { role: "assistant"; content: string; toolCalls?: ToolCall[] }
+  | { role: "tool"; content: string; toolCallId: string; toolName: string };
 
 export interface ProviderTool {
   name:
@@ -20,6 +18,7 @@ export interface ProviderTool {
     | "send_steer"
     | "submit_plan"
     | "submit_work_order"
+    | "submit_review"
     | "cast_vote"
     | "ask_user";
   description: string;
@@ -144,10 +143,7 @@ async function completeChat(request: ModelRequest): Promise<ModelReply> {
 async function completeResponses(request: ModelRequest): Promise<ModelReply> {
   const body: Record<string, unknown> = {
     model: request.config.model,
-    input: request.messages.map((message) => ({
-      role: message.role === "tool" ? "user" : message.role,
-      content: message.content
-    })),
+    input: toResponsesInput(request.messages),
     stream: true,
     tools: request.tools.map((tool) => ({
       type: "function",
@@ -262,7 +258,48 @@ function toChatMessages(messages: ProviderMessage[]): Record<string, unknown>[] 
         content: message.content
       };
     }
-    return { role: message.role, content: message.content };
+    return {
+      role: message.role,
+      content: message.content,
+      ...(message.role === "assistant" && message.toolCalls?.length
+        ? {
+            tool_calls: message.toolCalls.map((call) => ({
+              id: call.id,
+              type: "function",
+              function: { name: call.name, arguments: call.arguments }
+            }))
+          }
+        : {})
+    };
+  });
+}
+
+function toResponsesInput(messages: ProviderMessage[]): Array<Record<string, unknown>> {
+  return messages.flatMap((message) => {
+    if (message.role === "tool") {
+      const output: Record<string, unknown>[] = [{
+        type: "function_call_output",
+        call_id: message.toolCallId,
+        output: message.content
+      }];
+      return output;
+    }
+    if (message.role === "assistant" && message.toolCalls?.length) {
+      const items: Record<string, unknown>[] = [
+        ...(message.content
+          ? [{ role: "assistant", content: message.content }]
+          : []),
+        ...message.toolCalls.map((call) => ({
+          type: "function_call",
+          call_id: call.id,
+          name: call.name,
+          arguments: call.arguments
+        }))
+      ];
+      return items;
+    }
+    const item: Record<string, unknown>[] = [{ role: message.role, content: message.content }];
+    return item;
   });
 }
 

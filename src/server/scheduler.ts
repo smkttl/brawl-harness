@@ -23,6 +23,7 @@ import {
 import type { Store } from "./store.js";
 import { inspectBubblewrap } from "./sandbox.js";
 import { inspectForApproval, WorkspaceTools, type ToolResult } from "./tools.js";
+import { resolveSessionWorkspace } from "./workspace.js";
 
 interface RunHandle {
   sessionId: string;
@@ -85,6 +86,24 @@ const META_TOOLS: ProviderTool[] = [
         acceptanceCriteria: { type: "array", items: { type: "string" } }
       },
       required: ["objective", "constraints", "acceptanceCriteria"]
+    }
+  },
+  {
+    name: "submit_review",
+    description:
+      "Submit the mandatory structured verdict for a completed Oracle review.",
+    parameters: {
+      type: "object",
+      properties: {
+        workOrderId: { type: "string" },
+        decision: { type: "string", enum: ["approve", "reject"] },
+        feedback: { type: "string" },
+        failedCriteria: {
+          type: "array",
+          items: { type: "string" }
+        }
+      },
+      required: ["workOrderId", "decision", "feedback", "failedCriteria"]
     }
   },
   {
@@ -171,12 +190,15 @@ const WORKSPACE_TOOLS: ProviderTool[] = [
   },
   {
     name: "shell_exec",
-    description: "Run a shell command in the workspace as the current OS user.",
+    description:
+      "Run a shell command in the workspace. execution=sandboxed runs in Bubblewrap by default; execution=host requests reviewed host execution and requires hostReason.",
     parameters: {
       type: "object",
       properties: {
         command: { type: "string" },
-        timeoutMs: { type: "integer" }
+        timeoutMs: { type: "integer" },
+        execution: { type: "string", enum: ["sandboxed", "host"], default: "sandboxed" },
+        hostReason: { type: "string" }
       },
       required: ["command"]
     }
@@ -194,6 +216,7 @@ export class Scheduler {
   private readonly activeTurns = new Set<string>();
   private readonly stopping = new Set<string>();
   private readonly planAttempted = new Set<string>();
+  private readonly missingReviewRetry = new Set<string>();
 
   constructor(input: {
     store: Store;
@@ -214,7 +237,8 @@ export class Scheduler {
 
   async start(sessionId: string, firstMessage: string | null, mode: Mode): Promise<void> {
     if (this.runs.has(sessionId)) throw new BrawlError("Session is already running", 409);
-    this.requireSession(sessionId);
+    const session = this.requireSession(sessionId);
+    await resolveSessionWorkspace(this.runtime.workspace, session.workspace);
     if (!this.configReady()) {
       throw new BrawlError("Configure a provider and model for all three agents first", 409);
     }
@@ -239,6 +263,7 @@ export class Scheduler {
 
   async resume(sessionId: string, mode: Mode): Promise<void> {
     const session = this.requireSession(sessionId);
+    await resolveSessionWorkspace(this.runtime.workspace, session.workspace);
     if (!["interrupted", "awaiting_user", "paused"].includes(session.status)) {
       throw new BrawlError(`Cannot resume from ${session.status}`, 409);
     }
@@ -373,35 +398,51 @@ export class Scheduler {
           await Promise.all(steeredRoles.map((role) => this.runAgent(sessionId, role, signal, mode, null)));
           continue;
         }
-        if (current.mode === "productive" && current.status !== "awaiting_user") {
-          if (!active && !this.planAttempted.has(sessionId)) {
-            this.planAttempted.add(sessionId);
-            await this.runAgent(sessionId, "oracle", signal, mode, "Plan the task and create the first scoped work order.");
-            continue;
-          }
-          if (active?.status === "active") {
-            await this.runAgent(
+        if (current.status === "awaiting_user") {
+          completed = true;
+          break;
+        }
+        if (current.mode === "productive" && !active && !this.planAttempted.has(sessionId)) {
+          this.planAttempted.add(sessionId);
+          await this.runAgent(sessionId, "oracle", signal, mode, "Plan the task and create the first scoped work order.");
+          continue;
+        }
+        if (current.mode === "productive" && active?.status === "active") {
+          await this.runAgent(
+            sessionId,
+            "executor",
+            signal,
+            mode,
+            `Execute active work order ${active.id}: ${active.objective}`
+          );
+          continue;
+        }
+        if (current.mode === "productive" && active?.status === "submitted") {
+          if (this.missingReviewRetry.has(active.id)) {
+            this.store.setStatus(
               sessionId,
-              "executor",
-              signal,
-              mode,
-              `Execute active work order ${active.id}: ${active.objective}`
+              "awaiting_user",
+              "Oracle did not provide a structured review verdict."
             );
+            this.actor(sessionId, "speaker").queued.push({
+              id: randomUUID(),
+              instruction:
+                "Explain that Oracle did not provide a structured review verdict and ask the user how to proceed. Do not claim the work was accepted."
+            });
+            this.missingReviewRetry.delete(active.id);
             continue;
           }
-          if (active?.status === "submitted") {
-            await this.runAgent(
-              sessionId,
-              "oracle",
-              signal,
-              mode,
-              `Review the evidence submitted for work order ${active.id}.`
-            );
-            continue;
-          }
+          await this.runAgent(
+            sessionId,
+            "oracle",
+            signal,
+            mode,
+            `Review the evidence submitted for work order ${active.id}.`
+          );
+          continue;
         }
         const proposal = this.store.activeProposal(sessionId);
-        if (current.mode === "fun" && proposal && current.status !== "awaiting_user") {
+        if (current.mode === "fun" && proposal) {
           const outcome = await this.runProposalRound(sessionId, proposal, signal, mode);
           if (outcome === "continue") continue;
           if (outcome === "awaiting_user") {
@@ -440,10 +481,6 @@ export class Scheduler {
             "Use Speaker's relayed requirements to create a scoped work order for Executor. Ask Speaker to resolve material ambiguity before planning further."
           );
           continue;
-        }
-        if (current.status === "awaiting_user") {
-          completed = true;
-          break;
         }
         if (this.anyPendingSteer(sessionId)) {
           this.store.setStatus(sessionId, "awaiting_user", "Agents still have steering to process.");
@@ -595,7 +632,14 @@ export class Scheduler {
           });
         }
         if (reply.text.trim()) this.emit(sessionId, { role, type: "agent_message", content: reply.text });
-        if (reply.text) actor.history.push({ role: "assistant", content: reply.text });
+        if (reply.text || reply.toolCalls.length > 0) {
+          actor.history.push({
+            role: "assistant",
+            content: reply.text,
+            ...(reply.toolCalls.length > 0 ? { toolCalls: reply.toolCalls } : {})
+          });
+          messages.push(actor.history.at(-1)!);
+        }
         boundaryReached = true;
 
         if (reply.toolCalls.length === 0) {
@@ -606,8 +650,21 @@ export class Scheduler {
           ) {
             this.store.updateWorkOrder(workOrder.id, "submitted");
           }
-          if (role === "oracle" && workOrder?.status === "submitted") {
-            await this.finishReview(sessionId, workOrder);
+          if (
+            role === "oracle" &&
+            workOrder?.status === "submitted"
+          ) {
+            if (!this.missingReviewRetry.has(workOrder.id)) {
+              this.missingReviewRetry.add(workOrder.id);
+              actor.history.push({
+                role: "user",
+                content:
+                  "The review verdict is missing. You must call submit_review for this work order with decision, feedback, and failedCriteria. Do not answer in prose only."
+              });
+              messages.push(actor.history.at(-1)!);
+              continue;
+            }
+            break;
           }
           if (role === "oracle" && mode === "productive" && !this.store.activeWorkOrder(sessionId)) {
             this.actor(sessionId, "speaker").queued.push({
@@ -654,13 +711,12 @@ export class Scheduler {
             toolName: call.name,
             content: result
           });
+          messages.push(actor.history.at(-1) as ProviderMessage);
           messages.push({
-            role: "tool",
-            toolCallId: call.id,
-            toolName: call.name,
-            content: result
+            role: "user",
+            content: `Tool ${call.name} result is above. Continue.`
           });
-          messages.push({ role: "user", content: `Tool ${call.name} result is above. Continue.` });
+          if (call.name === "send_steer") break;
           if (this.requireSession(sessionId).status === "awaiting_user") break;
         }
         if (this.isSessionSatisfied(sessionId)) break;
@@ -732,6 +788,38 @@ export class Scheduler {
       });
       return JSON.stringify({ ok: true, output: `Created work order ${order.id}`, workOrder: order });
     }
+    if (name === "submit_review") {
+      if (role !== "oracle") {
+        return JSON.stringify({ ok: false, output: "Only Oracle can submit a review" });
+      }
+      const workOrderId = String(args.workOrderId ?? "");
+      const order = this.store.workOrdersById(workOrderId);
+      if (!order || order.sessionId !== sessionId || order.status !== "submitted") {
+        return JSON.stringify({ ok: false, output: "Work order is not awaiting review" });
+      }
+      const decision = args.decision === "approve" ? "approve" : args.decision === "reject" ? "reject" : null;
+      const feedback = String(args.feedback ?? "").trim();
+      const failedCriteria = stringList(args.failedCriteria);
+      if (!decision || !feedback) {
+        return JSON.stringify({
+          ok: false,
+          output: "Review decision and feedback are required"
+        });
+      }
+      if (decision === "reject" && failedCriteria.length === 0) {
+        return JSON.stringify({
+          ok: false,
+          output: "A rejected review must identify at least one failed criterion"
+        });
+      }
+      this.missingReviewRetry.delete(workOrderId);
+      if (decision === "approve") {
+        await this.finishReview(sessionId, order, feedback, failedCriteria);
+      } else {
+        this.rejectReview(sessionId, order, feedback, failedCriteria);
+      }
+      return JSON.stringify({ ok: true, output: `Recorded ${decision} review` });
+    }
     if (name === "cast_vote") {
       if (mode !== "fun") return JSON.stringify({ ok: false, output: "Votes are only used in fun mode" });
       const proposal = this.store.getProposal(String(args.proposalId ?? ""));
@@ -772,6 +860,12 @@ export class Scheduler {
       const question = String(args.question ?? "").trim();
       if (!question) return JSON.stringify({ ok: false, output: "Question cannot be empty" });
       this.store.setStatus(sessionId, "awaiting_user", "Waiting for Speaker's clarification question.");
+      this.emit(sessionId, {
+        role,
+        type: "speaker_message",
+        content: question,
+        data: { question, kind: "clarification" }
+      });
       this.emit(sessionId, { role, type: "status", content: "Waiting for the user's answer." });
       this.publishSession(sessionId);
       return JSON.stringify({ ok: true, output: "The session is paused until the user responds" });
@@ -793,17 +887,42 @@ export class Scheduler {
       return JSON.stringify({ ok: false, output: "Wait for the pending action to be resolved before proposing another" });
     }
     const action = name as ToolName;
-    const workspace = this.requireSession(sessionId).workspace;
+    const workspace = await resolveSessionWorkspace(
+      this.runtime.workspace,
+      this.requireSession(sessionId).workspace
+    );
+    const immutableArgs = await inspectForApproval(
+      new WorkspaceTools(workspace, this.configStore.get().shellTimeoutMs),
+      action,
+      args
+    );
     const sandboxMode = this.requireSession(sessionId).sandboxMode;
+    const hostExecution = action === "shell_exec" && immutableArgs.execution === "host";
+    if (hostExecution && !String(immutableArgs.hostReason ?? "").trim()) {
+      const result: ToolResult = {
+        ok: false,
+        output: "Host execution requires a non-empty hostReason"
+      };
+      this.recordTool(sessionId, role, action, immutableArgs, result);
+      return JSON.stringify(result);
+    }
+    if (hostExecution && sandboxMode === "enabled") {
+      const result: ToolResult = {
+        ok: false,
+        output: "Host execution is unavailable in enabled sandbox mode"
+      };
+      this.recordTool(sessionId, role, action, immutableArgs, result);
+      return JSON.stringify(result);
+    }
     const tools = new WorkspaceTools(
       workspace,
       this.configStore.get().shellTimeoutMs,
-      sandboxMode === "enabled" ? "enabled" : "disabled"
+      sandboxMode === "enabled" ? "enabled" : "disabled",
+      { allowHostExecution: sandboxMode === "auto-review" && hostExecution }
     );
-    const immutableArgs = await inspectForApproval(tools, action, args);
     if (mode === "productive") {
       let result: ToolResult;
-      if (action === "shell_exec" && sandboxMode === "auto-review") {
+      if (action === "shell_exec" && sandboxMode === "auto-review" && hostExecution) {
         const review = await this.reviewShellCommand(
           sessionId,
           workOrder,
@@ -861,13 +980,24 @@ export class Scheduler {
     this.store.updateProposal(current.id, { status: "executed" });
     this.events.publish(sessionId, { type: "proposal", proposal: null });
     const session = this.requireSession(sessionId);
+    const workspace = await resolveSessionWorkspace(this.runtime.workspace, session.workspace);
+    const hostExecution =
+      current.action === "shell_exec" && current.args.execution === "host";
     const tools = new WorkspaceTools(
-      session.workspace,
+      workspace,
       this.configStore.get().shellTimeoutMs,
-      session.sandboxMode === "enabled" ? "enabled" : "disabled"
+      session.sandboxMode === "enabled" ? "enabled" : "disabled",
+      {
+        allowHostExecution:
+          session.sandboxMode === "auto-review" && hostExecution
+      }
     );
     let result: ToolResult;
-    if (current.action === "shell_exec" && session.sandboxMode === "auto-review") {
+    if (
+      current.action === "shell_exec" &&
+      session.sandboxMode === "auto-review" &&
+      hostExecution
+    ) {
       const review = await this.reviewShellCommand(
         sessionId,
         this.store.activeWorkOrder(sessionId),
@@ -929,6 +1059,7 @@ export class Scheduler {
     const provider = this.requireProvider(config.providerId);
     const command = String(args.command ?? "");
     const timeoutMs = args.timeoutMs ?? this.configStore.get().shellTimeoutMs;
+    const hostReason = String(args.hostReason ?? "").trim();
     const context = this.store
       .events(sessionId)
       .filter(
@@ -946,7 +1077,7 @@ export class Scheduler {
         role: "system",
         content: `You are Oracle, acting as an ephemeral sandbox reviewer. Decide whether one exact shell command is safe to run and aligns with the user's intent and active work order.
 This review is not a planning turn. You have no tools and no history outside the supplied context.
-Deny commands that escape the workspace, access network, alter system configuration, invoke sudo or privilege escalation, expose credentials, persist outside the workspace, or exceed the stated intent.
+The Executor explicitly requested host execution. Approve only when the command needs capabilities that the sandbox blocks and the stated reason justifies running it outside Bubblewrap. Deny commands that escape the workspace without necessity, alter system configuration, invoke sudo or privilege escalation, expose credentials, persist outside the workspace, or exceed the stated intent.
 Return only JSON in the form {"allow":true,"reason":"brief reason"} or {"allow":false,"reason":"specific denial reason"}.
 A denial must include a non-empty reason.`
       },
@@ -963,7 +1094,11 @@ Acceptance criteria: ${workOrder.acceptanceCriteria.join("; ") || "(none)"}
 Exact shell_exec request:
 ${command}
 Timeout: ${String(timeoutMs)}
-Sandbox mode: auto-review (the command will run in the configured workspace if allowed).`
+Requested execution: host (outside Bubblewrap)
+Executor's host-access reason:
+${hostReason}
+
+Approve only if this exact command truly needs host capabilities that Bubblewrap blocks, remains aligned with the work order and user intent, and does not access secrets or perform unrelated system changes.`
       }
     ];
     try {
@@ -985,12 +1120,22 @@ Sandbox mode: auto-review (the command will run in the configured workspace if a
     }
   }
 
-  private async finishReview(sessionId: string, workOrder: WorkOrder): Promise<void> {
-    this.store.updateWorkOrder(workOrder.id, "reviewed");
+  private async finishReview(
+    sessionId: string,
+    workOrder: WorkOrder,
+    feedback: string,
+    failedCriteria: string[]
+  ): Promise<void> {
+    const reviewed = this.store.recordReview(workOrder.id, {
+      decision: "approve",
+      feedback,
+      failedCriteria
+    });
     this.emit(sessionId, {
       role: "oracle",
-      type: "status",
-      content: `Work order reviewed: ${workOrder.objective}`
+      type: "review",
+      content: feedback,
+      data: { workOrder: reviewed, decision: "approve" }
     });
     const evidence = this.store
       .events(sessionId)
@@ -1004,9 +1149,39 @@ Sandbox mode: auto-review (the command will run in the configured workspace if a
     });
   }
 
+  private rejectReview(
+    sessionId: string,
+    workOrder: WorkOrder,
+    feedback: string,
+    failedCriteria: string[]
+  ): void {
+    const rejected = this.store.recordReview(workOrder.id, {
+      decision: "reject",
+      feedback,
+      failedCriteria
+    });
+    this.emit(sessionId, {
+      role: "oracle",
+      type: "review",
+      content: feedback,
+      data: { workOrder: rejected, decision: "reject" }
+    });
+    this.actor(sessionId, "executor").queued.push({
+      id: randomUUID(),
+      instruction:
+        `Oracle rejected work order ${workOrder.id}. Address every failed criterion and resubmit with evidence.\n` +
+        `Feedback: ${feedback}\nFailed criteria: ${failedCriteria.join("; ")}`
+    });
+    this.publishSession(sessionId);
+  }
+
   private isSessionSatisfied(sessionId: string): boolean {
     const active = this.store.activeWorkOrder(sessionId);
-    return Boolean(!active && this.actor(sessionId, "speaker").queued.length === 0);
+    return Boolean(
+      !active &&
+      !this.store.activeProposal(sessionId) &&
+      this.actor(sessionId, "speaker").queued.length === 0
+    );
   }
 
   private consumeSteers(sessionId: string, role: Role): ProviderMessage[] {

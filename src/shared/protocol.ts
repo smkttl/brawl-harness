@@ -63,8 +63,9 @@ export interface ProviderConfig {
   updatedAt: string;
 }
 
-export interface PublicProviderConfig extends Omit<ProviderConfig, "apiKey"> {
+export interface PublicProviderConfig extends Omit<ProviderConfig, "apiKey" | "headers"> {
   hasApiKey: boolean;
+  hasHeaders: boolean;
 }
 
 export interface AgentConfig {
@@ -91,6 +92,10 @@ export interface WorkOrder {
   constraints: string[];
   acceptanceCriteria: string[];
   status: "proposed" | "active" | "submitted" | "reviewed" | "rejected";
+  reviewDecision: "approve" | "reject" | null;
+  reviewFeedback: string | null;
+  reviewFailedCriteria: string[];
+  reviewedAt: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -122,6 +127,7 @@ export type TranscriptType =
   | "thinking_summary"
   | "usage"
   | "status"
+  | "review"
   | "error";
 
 export interface TranscriptEvent {

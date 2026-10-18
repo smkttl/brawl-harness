@@ -1,7 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildApp } from "./app.js";
 import { resolveRuntime } from "./config.js";
-import { chatReply, makeHarnessFixture, mockFetch, waitFor } from "./test-helpers.js";
+import {
+  chatReply,
+  makeHarnessFixture,
+  mockFetch,
+  submitReviewReply,
+  waitFor
+} from "./test-helpers.js";
 
 const originalFetch = globalThis.fetch;
 
@@ -46,6 +52,8 @@ describe("backend", () => {
         })
       ).json();
       expect(config.providers[0]).not.toHaveProperty("apiKey");
+      expect(config.providers[0]).not.toHaveProperty("headers");
+      expect(config.providers[0].hasHeaders).toBe(false);
     } finally {
       await app.close();
       context.store.close();
@@ -96,6 +104,14 @@ describe("backend", () => {
       const detail = context.store.sessionDetail(id)!;
       expect(oracleCalls).toBe(0);
       expect(detail.events.some((event) => event.role === "speaker" && event.type === "agent_message" && event.content.includes("which project"))).toBe(true);
+      expect(
+        detail.events.some(
+          (event) =>
+            event.role === "speaker" &&
+            event.type === "speaker_message" &&
+            event.content === "Which project should I update?"
+        )
+      ).toBe(true);
       expect(detail.events.some((event) => event.role === "speaker" && event.type === "status" && event.content.includes("Waiting for the user's answer"))).toBe(true);
     } finally {
       context.scheduler.stop(context.store.listSessions()[0]?.id ?? "");
@@ -111,6 +127,7 @@ describe("backend", () => {
     let executorCalls = 0;
     let speakerCalls = 0;
     let reviewed = false;
+    let sessionId = "";
     globalThis.fetch = mockFetch((role) => {
       if (role === "oracle" && oracleCalls++ === 0) {
         return [
@@ -135,6 +152,14 @@ describe("backend", () => {
           chatReply({ text: "Plan accepted." })
         ];
       }
+      if (role === "oracle") {
+        reviewed = true;
+        return [
+          submitReviewReply({
+            workOrderId: context.store.workOrders(sessionId)[0]!.id
+          })
+        ];
+      }
       if (role === "executor" && executorCalls++ === 0) {
         return [
           chatReply({
@@ -143,10 +168,6 @@ describe("backend", () => {
           }),
           chatReply({ text: "The first word is Fixture. Verification: read README.md." })
         ];
-      }
-      if (role === "oracle") {
-        reviewed = true;
-        return [chatReply({ text: "Evidence satisfies the acceptance criterion." })];
       }
       if (role === "speaker" && speakerCalls++ === 0) {
         return [chatReply({ text: "The README starts with **Fixture**. The workspace was not edited." })];
@@ -175,6 +196,7 @@ describe("backend", () => {
         })
       ).json();
       const id = created.session.id as string;
+      sessionId = id;
       await context.scheduler.start(id, "What is the first word in README.md?", "productive");
       try {
         await waitFor(() => context.store.getSession(id)?.status === "idle");
@@ -209,14 +231,26 @@ describe("backend", () => {
     let oracleCalls = 0;
     let executorCalls = 0;
     let speakerCalls = 0;
+    const initialVoters = new Set<Role>();
+    let sessionId = "";
+    const built = await buildApp(
+      resolveRuntime({
+        dataDir: fixture.dataDir,
+        workspace: fixture.workspace,
+        apiToken: "secret",
+        authDisabled: false
+      })
+    );
+    const { app, context } = built;
     globalThis.fetch = mockFetch((role, body) => {
       const serialized = JSON.stringify(body.messages);
       if (
         serialized.includes("Fun-mode deliberation for proposal") &&
-        !serialized.includes("Tool cast_vote result is above. Continue.")
+        !initialVoters.has(role)
       ) {
         const proposalId = serialized.match(/proposal ([0-9a-f-]{36})/)?.[1];
         if (!proposalId) throw new Error("Proposal id missing from deliberation prompt");
+        initialVoters.add(role);
         return [
           chatReply({
             calls: [
@@ -260,15 +294,15 @@ describe("backend", () => {
           chatReply({ text: "I have proposed the requested read." })
         ];
       }
+      if (
+        role === "oracle" &&
+        (serialized.includes("Review the evidence submitted") ||
+          serialized.includes("Review the evidence submitted for fun-mode"))
+      ) {
+        return [submitReviewReply({ workOrderId: context.store.workOrders(sessionId)[0]!.id })];
+      }
       return [chatReply({ text: "The requested work is complete." })];
     });
-    const runtime = resolveRuntime({
-      dataDir: fixture.dataDir,
-      workspace: fixture.workspace,
-      apiToken: "secret",
-      authDisabled: false
-    });
-    const { app, context } = await buildApp(runtime);
     const headers = { authorization: "Bearer secret" };
     try {
       const created = (
@@ -280,6 +314,7 @@ describe("backend", () => {
         })
       ).json();
       const id = created.session.id as string;
+      sessionId = id;
       await app.inject({
         method: "POST",
         url: `/api/sessions/${id}/messages`,
@@ -287,7 +322,7 @@ describe("backend", () => {
         payload: { content: "Read the README." }
       });
       try {
-        await waitFor(() => context.store.getSession(id)?.status === "idle", 5_000);
+        await waitFor(() => context.store.getSession(sessionId)?.status === "idle", 3_000);
       } catch {
         throw new Error(
           JSON.stringify({
@@ -330,6 +365,18 @@ describe("backend", () => {
     let oracleCalls = 0;
     let executorCalls = 0;
     const initialVoters = new Set<string>();
+    let rebuttalServed = false;
+    let revisionServed = false;
+    const built = await buildApp(
+      resolveRuntime({
+        dataDir: fixture.dataDir,
+        workspace: fixture.workspace,
+        apiToken: "secret",
+        authDisabled: false
+      })
+    );
+    const { context } = built;
+    let sessionId = "";
     const originalResponder = (role: string) => {
       if (role === "oracle" && oracleCalls++ === 0) {
         return [
@@ -389,12 +436,10 @@ describe("backend", () => {
       if (
         role === "executor" &&
         serialized.includes("Fun-mode rebuttal for proposal") &&
-        !serialized.includes("Workspace actions are unavailable during the fun-mode rebuttal")
+        !rebuttalServed
       ) {
+        rebuttalServed = true;
         return [
-          chatReply({
-            calls: [{ name: "workspace_read", arguments: { path: "README.md" } }]
-          }),
           chatReply({
             calls: [
               {
@@ -405,16 +450,16 @@ describe("backend", () => {
                 }
               }
             ]
-          }),
-          chatReply({ text: "My case is in the evidence and the steering message." })
+          })
         ];
       }
       if (
         role === "speaker" &&
         serialized.includes("Fun-mode vote response for proposal") &&
-        !serialized.includes("Tool cast_vote result is above. Continue.")
+        !revisionServed
       ) {
         if (!proposalId) throw new Error("Proposal id missing from vote response prompt");
+        revisionServed = true;
         return [
           chatReply({
             calls: [
@@ -430,9 +475,20 @@ describe("backend", () => {
           })
         ];
       }
+      if (
+        role === "oracle" &&
+        (serialized.includes("Review the evidence submitted") ||
+          serialized.includes("Review the evidence submitted for fun-mode"))
+      ) {
+        return [
+          submitReviewReply({
+            workOrderId: context.store.workOrders(sessionId)[0]!.id
+          })
+        ];
+      }
       return originalResponder(role);
     });
-    const { app, context } = await buildApp(
+    const { app } = await buildApp(
       resolveRuntime({
         dataDir: fixture.dataDir,
         workspace: fixture.workspace,
@@ -451,16 +507,44 @@ describe("backend", () => {
         })
       ).json();
       const id = created.session.id as string;
+      sessionId = id;
       await app.inject({
         method: "POST",
         url: `/api/sessions/${id}/messages`,
         headers,
         payload: { content: "Read the README." }
       });
-      await waitFor(
-        () => context.store.events(id).some((event) => event.type === "tool_result"),
-        5_000
-      );
+      try {
+        await waitFor(
+          () => context.store.events(id).some((event) => event.type === "tool_result"),
+          5_000
+        );
+      } catch {
+        throw new Error(
+          JSON.stringify({
+            session: context.store.getSession(id),
+            events: context.store.events(id).slice(-20).map((event) => ({
+              role: event.role,
+              type: event.type,
+              content: event.content.slice(0, 500)
+            }))
+          }, null, 2)
+        );
+      }
+      try {
+        await waitFor(() => context.store.getSession(id)?.status === "idle", 5_000);
+      } catch {
+        throw new Error(
+          JSON.stringify({
+            session: context.store.getSession(id),
+            events: context.store.events(id).slice(-20).map((event) => ({
+              role: event.role,
+              type: event.type,
+              content: event.content.slice(0, 500)
+            }))
+          }, null, 2)
+        );
+      }
 
       const detail = context.store.sessionDetail(id)!;
       const votes = detail.events.filter((event) => event.type === "vote");

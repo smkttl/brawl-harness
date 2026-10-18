@@ -25,6 +25,11 @@ import { discoverModels, supportedEfforts } from "./provider.js";
 import { Scheduler } from "./scheduler.js";
 import { inspectBubblewrap } from "./sandbox.js";
 import { Store } from "./store.js";
+import {
+  canonicalWorkspaceRoot,
+  listWorkspaceDirectories,
+  resolveSessionWorkspace
+} from "./workspace.js";
 
 export interface AppContext {
   runtime: RuntimeOptions;
@@ -36,7 +41,22 @@ export interface AppContext {
 
 export async function buildApp(runtime: RuntimeOptions, opts: { logger?: boolean } = {}) {
   const app = Fastify({ logger: opts.logger ?? false, bodyLimit: 2_000_000 });
+  runtime.workspace = await canonicalWorkspaceRoot(runtime.workspace);
   const store = new Store(join(runtime.dataDir, "brawl.sqlite"));
+  for (const session of store.listSessions()) {
+    try {
+      const workspace = await resolveSessionWorkspace(runtime.workspace, session.workspace);
+      if (workspace !== session.workspace) {
+        store.updateSession(session.id, { workspace });
+      }
+    } catch (error) {
+      store.setStatus(
+        session.id,
+        "failed",
+        `Unsafe or invalid workspace: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
   store.restoreInterruptedSessions();
   const configStore = new ConfigStore(runtime.configPath, runtime.workspace);
   const events = new SessionEvents();
@@ -92,6 +112,9 @@ export async function buildApp(runtime: RuntimeOptions, opts: { logger?: boolean
 
   app.post("/api/providers", async (request) => {
     const draft = providerSchema.parse(request.body) as ProviderDraft;
+    if (hasCredentialHeaders(draft.headers)) {
+      throw new BrawlError("Provider credentials must use apiKey or apiKeyEnv, not custom headers");
+    }
     const now = new Date().toISOString();
     const provider: ProviderConfig = {
       ...draft,
@@ -113,7 +136,14 @@ export async function buildApp(runtime: RuntimeOptions, opts: { logger?: boolean
     const next = configStore.get();
     const current = next.providers.find((provider) => provider.id === id);
     if (!current) throw new BrawlError("Provider not found", 404);
-    Object.assign(current, draft, { updatedAt: new Date().toISOString() });
+    const { headers, ...fields } = draft;
+    if (hasCredentialHeaders(headers)) {
+      throw new BrawlError("Provider credentials must use apiKey or apiKeyEnv, not custom headers");
+    }
+    Object.assign(current, fields, {
+      ...(headers === undefined ? {} : { headers }),
+      updatedAt: new Date().toISOString()
+    });
     configStore.save(next);
     return redactProvider(current);
   });
@@ -164,17 +194,27 @@ export async function buildApp(runtime: RuntimeOptions, opts: { logger?: boolean
   });
 
   app.get("/api/sessions", async () => ({ sessions: store.listSessions() }));
+  app.get("/api/workspace/directories", async (request) => {
+    const input = z
+      .object({ path: z.string().default(".") })
+      .parse(request.query);
+    return listWorkspaceDirectories(runtime.workspace, input.path);
+  });
   app.post("/api/sessions", async (request) => {
     const input = sessionSchema.parse(request.body) as CreateSessionInput;
     const mode = input.mode ?? "productive";
     if (mode === "fun" && input.sandboxMode === "auto-review") {
       throw new BrawlError("auto-review sandbox mode is only available in productive mode");
     }
+    const workspace = await resolveSessionWorkspace(
+      runtime.workspace,
+      input.workspace || runtime.workspace
+    );
     const session = store.createSession({
       title: input.title || "New session",
       mode,
       sandboxMode: input.sandboxMode ?? "enabled",
-      workspace: input.workspace || runtime.workspace
+      workspace
     });
     return store.sessionDetail(session.id);
   });
@@ -249,8 +289,7 @@ export async function buildApp(runtime: RuntimeOptions, opts: { logger?: boolean
   app.get("/api/sessions/:id/stream", async (request, reply) => {
     const { id } = request.params as { id: string };
     const after = Number((request.query as { after?: string }).after ?? 0);
-    const detail = store.sessionDetail(id, 0);
-    if (!detail) throw new BrawlError("Session not found", 404);
+    if (!store.getSession(id)) throw new BrawlError("Session not found", 404);
     reply.hijack();
     reply.raw.writeHead(200, {
       "content-type": "text/event-stream",
@@ -258,23 +297,55 @@ export async function buildApp(runtime: RuntimeOptions, opts: { logger?: boolean
       connection: "keep-alive",
       "x-accel-buffering": "no"
     });
+    let closed = false;
+    let ready = false;
+    let lastSeqSent = after;
+    const buffered: StreamEnvelope[] = [];
     const send = (data: StreamEnvelope) => {
+      if (closed) return;
       reply.raw.write(`data: ${JSON.stringify(data)}\n\n`);
     };
-    if (after === 0) {
-      send({ type: "snapshot", snapshot: detail });
-    }
-    const replay = after === 0 ? [] : store.events(id, after);
-    for (const event of replay) send({ type: "event", event });
-    const unsubscribe = events.subscribe(id, send);
+    const deliver = (data: StreamEnvelope) => {
+      if (data.type === "event") {
+        if (data.event.seq <= lastSeqSent) return;
+        lastSeqSent = data.event.seq;
+      }
+      send(data);
+    };
+    const unsubscribe = events.subscribe(id, (data) => {
+      if (!ready) buffered.push(data);
+      else deliver(data);
+    });
     const heartbeat = setInterval(
       () => send({ type: "heartbeat", at: new Date().toISOString() }),
       15_000
     );
     request.raw.on("close", () => {
+      closed = true;
       clearInterval(heartbeat);
       unsubscribe();
     });
+    if (after === 0) {
+      const detail = store.sessionDetail(id, 0);
+      if (!detail) {
+        closed = true;
+        clearInterval(heartbeat);
+        unsubscribe();
+        reply.raw.end();
+        return;
+      }
+      send({ type: "snapshot", snapshot: detail });
+      lastSeqSent = detail.session.lastSeq;
+    } else {
+      for (const event of store.events(id, after)) {
+        if (event.seq <= lastSeqSent) continue;
+        lastSeqSent = event.seq;
+        send({ type: "event", event });
+      }
+    }
+    ready = true;
+    buffered.sort((left, right) => envelopeSeq(left) - envelopeSeq(right));
+    for (const data of buffered.splice(0)) deliver(data);
   });
 
   const webRoot = join(dirname(fileURLToPath(import.meta.url)), "../web");
@@ -324,3 +395,13 @@ const sessionSchema = z.object({
 });
 
 const messageSchema = z.object({ content: z.string().min(1).max(200_000) });
+
+function envelopeSeq(envelope: StreamEnvelope): number {
+  return envelope.type === "event" ? envelope.event.seq : Number.MAX_SAFE_INTEGER;
+}
+
+function hasCredentialHeaders(headers: Record<string, string> | undefined): boolean {
+  return Object.keys(headers ?? {}).some((name) =>
+    /^(authorization|proxy-authorization|x-api-key|api-key)$/i.test(name)
+  );
+}

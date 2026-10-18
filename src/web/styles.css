@@ -83,6 +83,7 @@ input:focus, textarea:focus, select:focus { border-color: var(--ink); box-shadow
 .empty-room h1 { font-size: clamp(3.4rem, 8vw, 7rem); font-weight: 500; line-height: .9; letter-spacing: -.06em; margin: .2em 0; max-width: 800px; }
 .empty-room > p:not(.eyebrow) { max-width: 550px; font-size: 1.25rem; line-height: 1.45; color: #5c5d55; }
 .launch-card { margin-top: 42px; padding: 22px; border: 1px solid var(--ink); background: rgba(255,255,255,.27); box-shadow: var(--shadow); display: grid; gap: 10px; max-width: 620px; }
+.workspace-browse { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .launch-actions { display: flex; gap: 10px; margin-top: 8px; }
 .launch-actions .secondary { background: transparent; color: var(--ink); }
 
@@ -186,6 +187,10 @@ input:focus, textarea:focus, select:focus { border-color: var(--ink); box-shadow
 .provider-row code { font: 400 9px "DM Mono", monospace; color: var(--muted); max-width: 240px; overflow: hidden; text-overflow: ellipsis; }
 .provider-row button { border: 1px solid var(--rule); background: transparent; padding: 5px 7px; font: 500 8px "DM Mono", monospace; }
 .provider-row .quiet-danger { color: #993535; }
+.provider-header-editor { grid-column: 1 / -1; width: 100%; }
+.provider-header-editor summary { cursor: pointer; font: 500 9px "DM Mono", monospace; color: var(--muted); }
+.provider-header-editor form { display: flex; gap: 8px; margin-top: 8px; }
+.provider-header-editor textarea { flex: 1; min-height: 54px; }
 .provider-form { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 18px; }
 .provider-form label { display: grid; gap: 6px; }
 .provider-form label:nth-child(2) { grid-column: span 1; }

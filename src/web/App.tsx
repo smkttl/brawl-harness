@@ -259,6 +259,18 @@ function EmptyRoom({
   creating: boolean;
   onCreateMode: (mode: Mode) => void;
 }) {
+  const [directories, setDirectories] = useState<string[]>([]);
+  const [browsing, setBrowsing] = useState(false);
+  const browse = async () => {
+    try {
+      const result = await api.workspaceDirectories(workspace);
+      setDirectories(result.directories);
+      setBrowsing(true);
+    } catch {
+      setDirectories([]);
+      setBrowsing(true);
+    }
+  };
   return (
     <section className="empty-room">
       <p className="eyebrow">No live session</p>
@@ -270,6 +282,29 @@ function EmptyRoom({
       <div className="launch-card">
         <label htmlFor="workspace">Workspace path</label>
         <input id="workspace" value={workspace} onChange={(event) => setWorkspace(event.target.value)} />
+        <div className="workspace-browse">
+          <button type="button" onClick={() => void browse()}>Browse subdirectories</button>
+          {browsing && (
+            <select
+              aria-label="Workspace subdirectory"
+              value=""
+              onChange={(event) => {
+                if (!event.target.value) return;
+                setWorkspace(
+                  workspace.endsWith("/")
+                    ? `${workspace}${event.target.value}`
+                    : `${workspace}/${event.target.value}`
+                );
+                setBrowsing(false);
+              }}
+            >
+              <option value="">Choose a directory</option>
+              {directories.map((directory) => (
+                <option key={directory} value={directory}>{directory}</option>
+              ))}
+            </select>
+          )}
+        </div>
         <label htmlFor="sandbox">Shell isolation</label>
         <select
           id="sandbox"
@@ -438,7 +473,7 @@ function Conversation({
   const [sending, setSending] = useState(false);
   const scroller = useRef<HTMLDivElement>(null);
   const visible = detail.events.filter((event) =>
-    ["user_message", "agent_message", "plan", "work_order", "status", "error"].includes(event.type)
+    ["user_message", "speaker_message", "agent_message", "plan", "work_order", "review", "status", "error"].includes(event.type)
   );
   const guidance =
     detail.session.status === "awaiting_consensus" || detail.session.status === "awaiting_user";
@@ -525,6 +560,7 @@ function Message({ event }: { event: TranscriptEvent }) {
       </div>
       {event.type === "work_order" && <span className="event-tag">Work order</span>}
       {event.type === "plan" && <span className="event-tag">Plan</span>}
+      {event.type === "review" && <span className="event-tag">Oracle review</span>}
       <div
         className="message-body"
         dangerouslySetInnerHTML={{ __html: markdown.render(event.content) }}
@@ -635,6 +671,7 @@ function Settings({
     headers: {},
     models: []
   });
+  const [headerText, setHeaderText] = useState("");
   const [limitDraft, setLimitDraft] = useState({
     debateRounds: config.debateRounds,
     shellTimeoutMs: config.shellTimeoutMs,
@@ -669,6 +706,7 @@ function Settings({
               <div>
                 <strong>{provider.name}</strong>
                 <span>{provider.api} · {provider.apiKeyEnv ? `$${provider.apiKeyEnv}` : provider.hasApiKey ? "key stored" : "no key"}</span>
+                <span>{provider.hasHeaders ? "custom headers stored (hidden)" : "no custom headers"}</span>
               </div>
               <code>{provider.baseUrl}</code>
               <button
@@ -680,6 +718,33 @@ function Settings({
                 Discover
               </button>
               <button className="quiet-danger" onClick={() => void run(() => api.deleteProvider(provider.id))}>Remove</button>
+              <details className="provider-header-editor">
+                <summary>Replace headers</summary>
+                <form
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    const form = new FormData(event.currentTarget);
+                    const text = String(form.get("headers") ?? "");
+                    const headers: Record<string, string> = {};
+                    for (const line of text.split("\n")) {
+                      const separator = line.indexOf(":");
+                      if (separator > 0) {
+                        headers[line.slice(0, separator).trim()] = line.slice(separator + 1).trim();
+                      }
+                    }
+                    event.currentTarget.reset();
+                    void run(() => api.updateProvider(provider.id, { headers }));
+                  }}
+                >
+                  <textarea
+                    name="headers"
+                    aria-label={`Replace headers for ${provider.name}`}
+                    placeholder="Header-Name: value"
+                    rows={2}
+                  />
+                  <button type="submit">Replace</button>
+                </form>
+              </details>
             </article>
           ))}
           <form
@@ -689,6 +754,7 @@ function Settings({
               void run(async () => {
                 await api.createProvider(draft);
                 setDraft({ ...draft, name: "", apiKey: "", apiKeyEnv: "", models: [] });
+                setHeaderText("");
               });
             }}
           >
@@ -697,8 +763,31 @@ function Settings({
             <label>API<select value={draft.api} onChange={(event) => setDraft({ ...draft, api: event.target.value as "chat" | "responses" })}><option value="chat">Chat Completions</option><option value="responses">Responses</option></select></label>
             <label>API key<input type="password" value={draft.apiKey ?? ""} onChange={(event) => setDraft({ ...draft, apiKey: event.target.value })} placeholder="Stored server-side" /></label>
             <label>Or key env var<input value={draft.apiKeyEnv ?? ""} onChange={(event) => setDraft({ ...draft, apiKeyEnv: event.target.value })} placeholder="OPENAI_API_KEY" /></label>
+            <label>
+              Custom headers (write-only)
+              <textarea
+                value={headerText}
+                onChange={(event) => {
+                  const text = event.target.value;
+                  setHeaderText(text);
+                  const headers: Record<string, string> = {};
+                  for (const line of text.split("\n")) {
+                    const separator = line.indexOf(":");
+                    if (separator > 0) {
+                      headers[line.slice(0, separator).trim()] = line.slice(separator + 1).trim();
+                    }
+                  }
+                  setDraft({ ...draft, headers });
+                }}
+                placeholder={"Header-Name: value"}
+                rows={3}
+              />
+            </label>
             <button type="submit">Add endpoint</button>
           </form>
+          <p className="workspace-readout">
+            Header names and values are never returned. Omitting replacement headers preserves them.
+          </p>
         </section>
 
         <section className="panel">

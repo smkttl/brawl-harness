@@ -174,7 +174,9 @@ function App({ client, initialSessionId }: Props) {
 
 function Chat({ detail }: { detail: SessionDetail }) {
   const events = detail.events
-    .filter((event) => ["user_message", "agent_message", "plan", "work_order"].includes(event.type))
+    .filter((event) =>
+      ["user_message", "speaker_message", "agent_message", "plan", "work_order", "review"].includes(event.type)
+    )
     .slice(-14);
   return (
     <Box flexDirection="column" minHeight={12}>

@@ -68,6 +68,10 @@ export class Store {
         constraints TEXT NOT NULL,
         acceptance_criteria TEXT NOT NULL,
         status TEXT NOT NULL,
+        review_decision TEXT,
+        review_feedback TEXT,
+        review_failed_criteria TEXT,
+        reviewed_at TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
@@ -118,6 +122,19 @@ export class Store {
       "UPDATE sessions SET sandbox_mode='enabled' " +
         "WHERE sandbox_mode NOT IN ('enabled', 'disabled', 'auto-review')"
     );
+    const workOrderColumns = this.db.prepare("PRAGMA table_info(work_orders)").all() as Row[];
+    if (!workOrderColumns.some((column) => column.name === "review_decision")) {
+      this.db.exec("ALTER TABLE work_orders ADD COLUMN review_decision TEXT");
+    }
+    if (!workOrderColumns.some((column) => column.name === "review_feedback")) {
+      this.db.exec("ALTER TABLE work_orders ADD COLUMN review_feedback TEXT");
+    }
+    if (!workOrderColumns.some((column) => column.name === "review_failed_criteria")) {
+      this.db.exec("ALTER TABLE work_orders ADD COLUMN review_failed_criteria TEXT");
+    }
+    if (!workOrderColumns.some((column) => column.name === "reviewed_at")) {
+      this.db.exec("ALTER TABLE work_orders ADD COLUMN reviewed_at TEXT");
+    }
   }
 
   close(): void {
@@ -197,7 +214,7 @@ export class Store {
     };
   }
 
-  updateSession(id: string, patch: Partial<Pick<Session, "title" | "mode" | "sandboxMode" | "status" | "activeWorkOrderId" | "failure">>): Session {
+  updateSession(id: string, patch: Partial<Pick<Session, "title" | "mode" | "sandboxMode" | "status" | "workspace" | "activeWorkOrderId" | "failure">>): Session {
     const current = this.getSession(id);
     if (!current) throw new Error(`Unknown session ${id}`);
     const next = {
@@ -207,7 +224,7 @@ export class Store {
     };
     this.db
       .prepare(
-        `UPDATE sessions SET title=?, mode=?, sandbox_mode=?, status=?, active_work_order_id=?, failure=?, updated_at=?
+        `UPDATE sessions SET title=?, mode=?, sandbox_mode=?, status=?, workspace=?, active_work_order_id=?, failure=?, updated_at=?
          WHERE id=?`
       )
       .run(
@@ -215,6 +232,7 @@ export class Store {
         next.mode,
         next.sandboxMode,
         next.status,
+        next.workspace,
         next.activeWorkOrderId,
         next.failure,
         next.updatedAt,
@@ -308,20 +326,37 @@ export class Store {
     return next;
   }
 
-  createWorkOrder(input: Omit<WorkOrder, "id" | "createdAt" | "updatedAt" | "status">): WorkOrder {
+  createWorkOrder(
+    input: Omit<
+      WorkOrder,
+      | "id"
+      | "createdAt"
+      | "updatedAt"
+      | "status"
+      | "reviewDecision"
+      | "reviewFeedback"
+      | "reviewFailedCriteria"
+      | "reviewedAt"
+    >
+  ): WorkOrder {
     const now = new Date().toISOString();
     const order: WorkOrder = {
       ...input,
       id: randomUUID(),
       status: "active",
+      reviewDecision: null,
+      reviewFeedback: null,
+      reviewFailedCriteria: [],
+      reviewedAt: null,
       createdAt: now,
       updatedAt: now
     };
     this.db
       .prepare(
         `INSERT INTO work_orders
-         (id, session_id, objective, constraints, acceptance_criteria, status, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+         (id, session_id, objective, constraints, acceptance_criteria, status,
+          review_decision, review_feedback, review_failed_criteria, reviewed_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         order.id,
@@ -330,6 +365,10 @@ export class Store {
         JSON.stringify(order.constraints),
         JSON.stringify(order.acceptanceCriteria),
         order.status,
+        null,
+        null,
+        null,
+        null,
         now,
         now
       );
@@ -343,11 +382,79 @@ export class Store {
   updateWorkOrder(id: string, status: WorkOrder["status"]): WorkOrder {
     const current = this.workOrdersById(id);
     if (!current) throw new Error(`Unknown work order ${id}`);
-    const next: WorkOrder = { ...current, status, updatedAt: new Date().toISOString() };
+    const now = new Date().toISOString();
+    const next: WorkOrder = {
+      ...current,
+      status,
+      ...(status === "submitted" || status === "active"
+        ? {
+            reviewDecision: null,
+            reviewFeedback: null,
+            reviewFailedCriteria: [],
+            reviewedAt: null
+          }
+        : {}),
+      updatedAt: now
+    };
     this.db
-      .prepare("UPDATE work_orders SET status=?, updated_at=? WHERE id=?")
-      .run(status, next.updatedAt, id);
+      .prepare(
+        `UPDATE work_orders SET status=?, review_decision=?, review_feedback=?,
+         review_failed_criteria=?, reviewed_at=?, updated_at=? WHERE id=?`
+      )
+      .run(
+        next.status,
+        next.reviewDecision,
+        next.reviewFeedback,
+        JSON.stringify(next.reviewFailedCriteria),
+        next.reviewedAt,
+        next.updatedAt,
+        id
+      );
     if (status === "reviewed" || status === "rejected") {
+      const session = this.getSession(current.sessionId);
+      if (session?.activeWorkOrderId === id) {
+        this.updateSession(current.sessionId, { activeWorkOrderId: null });
+      }
+    }
+    return next;
+  }
+
+  recordReview(
+    id: string,
+    input: {
+      decision: "approve" | "reject";
+      feedback: string;
+      failedCriteria: string[];
+    }
+  ): WorkOrder {
+    const current = this.workOrdersById(id);
+    if (!current) throw new Error(`Unknown work order ${id}`);
+    const now = new Date().toISOString();
+    const approved = input.decision === "approve";
+    const next: WorkOrder = {
+      ...current,
+      status: approved ? "reviewed" : "active",
+      reviewDecision: input.decision,
+      reviewFeedback: input.feedback,
+      reviewFailedCriteria: input.failedCriteria,
+      reviewedAt: now,
+      updatedAt: now
+    };
+    this.db
+      .prepare(
+        `UPDATE work_orders SET status=?, review_decision=?, review_feedback=?,
+         review_failed_criteria=?, reviewed_at=?, updated_at=? WHERE id=?`
+      )
+      .run(
+        next.status,
+        next.reviewDecision,
+        next.reviewFeedback,
+        JSON.stringify(next.reviewFailedCriteria),
+        next.reviewedAt,
+        next.updatedAt,
+        id
+      );
+    if (approved) {
       const session = this.getSession(current.sessionId);
       if (session?.activeWorkOrderId === id) {
         this.updateSession(current.sessionId, { activeWorkOrderId: null });
@@ -617,6 +724,15 @@ function mapWorkOrder(row: Row): WorkOrder {
     constraints: JSON.parse(String(row.constraints)) as string[],
     acceptanceCriteria: JSON.parse(String(row.acceptance_criteria)) as string[],
     status: String(row.status) as WorkOrder["status"],
+    reviewDecision:
+      row.review_decision === "approve" || row.review_decision === "reject"
+        ? row.review_decision
+        : null,
+    reviewFeedback: row.review_feedback ? String(row.review_feedback) : null,
+    reviewFailedCriteria: row.review_failed_criteria
+      ? (JSON.parse(String(row.review_failed_criteria)) as string[])
+      : [],
+    reviewedAt: row.reviewed_at ? String(row.reviewed_at) : null,
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at)
   };

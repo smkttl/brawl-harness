@@ -179,7 +179,10 @@ function validateConfig(config: StoredHarnessConfig): StoredHarnessConfig {
 }
 
 export function redactProvider(provider: ProviderConfig): PublicHarnessConfig["providers"][number] {
-  const safe = { ...provider };
-  delete safe.apiKey;
-  return { ...safe, hasApiKey: Boolean(provider.apiKey) };
+  const { apiKey, headers, ...safe } = provider;
+  return {
+    ...safe,
+    hasApiKey: Boolean(apiKey || (provider.apiKeyEnv && process.env[provider.apiKeyEnv])),
+    hasHeaders: Object.keys(headers).length > 0
+  };
 }

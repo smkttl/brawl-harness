@@ -27,6 +27,10 @@ export class HarnessClient {
     return this.request("/api/config");
   }
 
+  async workspaceDirectories(path: string): Promise<{ path: string; directories: string[] }> {
+    return this.request(`/api/workspace/directories?path=${encodeURIComponent(path)}`);
+  }
+
   async sessions(): Promise<Session[]> {
     return (await this.request<{ sessions: Session[] }>("/api/sessions")).sessions;
   }

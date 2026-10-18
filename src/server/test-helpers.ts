@@ -73,6 +73,25 @@ export function chatReply(input: {
   ];
 }
 
+export function submitReviewReply(input: {
+  workOrderId: string;
+  decision?: "approve" | "reject";
+  feedback?: string;
+  failedCriteria?: string[];
+}) {
+  return chatReply({
+    calls: [{
+      name: "submit_review",
+      arguments: {
+        workOrderId: input.workOrderId,
+        decision: input.decision ?? "approve",
+        feedback: input.feedback ?? "The evidence satisfies the acceptance criteria.",
+        failedCriteria: input.failedCriteria ?? []
+      }
+    }]
+  });
+}
+
 export function mockFetch(
   responder: (role: Role, body: any) => any[],
   onRequest?: (role: Role, body: any) => void

@@ -46,11 +46,11 @@ function identityPrompt(role: Role): string {
 function productivePrompt(role: Role): string {
   if (role === "oracle") {
     return `PRODUCTIVE MODE
-Build a concrete plan with objectives, constraints, ordered steps, verification, and acceptance criteria. Ask Speaker to clarify material ambiguity before committing. Assign Executor a scoped work order. Review submitted evidence against each criterion. Prioritize correctness and completion over debate.`;
+Build a concrete plan with objectives, constraints, ordered steps, verification, and acceptance criteria. Ask Speaker to clarify material ambiguity before committing. Assign Executor a scoped work order. Review submitted evidence against each criterion. When a work order is submitted, you MUST call submit_review with an explicit approve or reject decision, feedback, and every failed criterion. Never rely on prose alone to complete or reject a work order. Prioritize correctness and completion over debate.`;
   }
   if (role === "executor") {
     return `PRODUCTIVE MODE
-Carry out the active Oracle work order faithfully. Choose ordinary implementation details inside its boundaries. Inspect before editing, make focused changes, run the requested and relevant checks, and report exact commands and outcomes. Ask Oracle for a revised work order before any scope change. Do not silently substitute requirements.`;
+Carry out the active Oracle work order faithfully. Choose ordinary implementation details inside its boundaries. Inspect before editing, make focused changes, run the requested and relevant checks, and report exact commands and outcomes. For shell_exec, use execution "sandboxed" by default. Set execution to "host" and provide hostReason only when the command truly requires capabilities that the sandbox blocks, such as approved network access. Do not request host execution for ordinary workspace commands. Ask Oracle for a revised work order before any scope change. Do not silently substitute requirements.`;
   }
   return `PRODUCTIVE MODE
 Act as a careful product-minded communicator. Before execution, resolve high-impact ambiguities with the user. Use ask_user when a material ambiguity blocks safe progress. Restate the goal, constraints, and acceptance criteria when useful. Explain decisions and current progress in plain language, confirm completion only from evidence, and turn technical evidence into readable materials.`;
@@ -77,7 +77,7 @@ function coordinationPrompt(role: Role, context: PromptContext): string {
     context.session.sandboxMode === "disabled"
       ? "Sandbox: disabled for shell commands. File tools still reject workspace escapes."
       : context.session.sandboxMode === "auto-review"
-        ? "Sandbox: enabled. Each shell_exec command is checked by an ephemeral Oracle safety review before it runs."
+        ? "Sandbox: auto-review. Ordinary shell_exec with execution=sandboxed runs directly in Bubblewrap. Only explicit execution=host requests, with a non-empty hostReason, receive an ephemeral Oracle review; an approved host request runs outside Bubblewrap. Never use host execution unless the work order requires it."
         : "Sandbox: enabled. shell_exec runs in a Bubblewrap namespace with no network, host files, system configuration, or privilege escalation.";
   return `COORDINATION
 Use send_steer to challenge, correct, or redirect teammates. Ordinary steering is queued for the recipient's next boundary. Because you are ${role}, do not impersonate another role.

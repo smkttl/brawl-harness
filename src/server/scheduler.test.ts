@@ -5,7 +5,13 @@ import { ConfigStore, resolveRuntime } from "./config.js";
 import { SessionEvents } from "./events.js";
 import { Scheduler } from "./scheduler.js";
 import { Store } from "./store.js";
-import { chatReply, makeHarnessFixture, mockFetch, waitFor } from "./test-helpers.js";
+import {
+  chatReply,
+  makeHarnessFixture,
+  mockFetch,
+  submitReviewReply,
+  waitFor
+} from "./test-helpers.js";
 
 const originalFetch = globalThis.fetch;
 
@@ -19,6 +25,13 @@ describe("scheduler", () => {
     let oracleCalls = 0;
     let executorCalls = 0;
     let speakerCalls = 0;
+    const store = new Store(join(fixture.dataDir, "brawl.sqlite"));
+    const session = store.createSession({
+      title: "Read fixture",
+      mode: "productive",
+      sandboxMode: "enabled",
+      workspace: fixture.workspace
+    });
     globalThis.fetch = mockFetch((role) => {
       if (role === "oracle" && oracleCalls++ === 0) {
         return [
@@ -45,7 +58,9 @@ describe("scheduler", () => {
           chatReply({ text: "The first word is Fixture." })
         ];
       }
-      if (role === "oracle") return [chatReply({ text: "The evidence meets the criteria." })];
+      if (role === "oracle") {
+        return [submitReviewReply({ workOrderId: store.workOrders(session.id)[0]!.id })];
+      }
       if (role === "speaker" && speakerCalls++ === 0) {
         return [chatReply({ text: "The README starts with **Fixture**." })];
       }
@@ -57,19 +72,12 @@ describe("scheduler", () => {
       apiToken: "secret",
       authDisabled: false
     });
-    const store = new Store(join(fixture.dataDir, "brawl.sqlite"));
     const configStore = new ConfigStore(runtime.configPath, fixture.workspace);
     const scheduler = new Scheduler({
       store,
       configStore,
       events: new SessionEvents(),
       runtime
-    });
-    const session = store.createSession({
-      title: "Read fixture",
-      mode: "productive",
-      sandboxMode: "enabled",
-      workspace: fixture.workspace
     });
     try {
       await scheduler.start(session.id, "What is the first word in README.md?", "productive");
@@ -92,15 +100,22 @@ describe("scheduler", () => {
     }
   });
 
-  it("runs an auto-reviewed command without storing a successful review", async () => {
+  it("runs ordinary auto-review commands without calling Oracle", async () => {
     const fixture = await makeHarnessFixture();
     let oracleCalls = 0;
     let executorCalls = 0;
+    const store = new Store(join(fixture.dataDir, "brawl.sqlite"));
+    const session = store.createSession({
+      title: "Auto review approval",
+      mode: "productive",
+      sandboxMode: "auto-review",
+      workspace: fixture.workspace
+    });
     globalThis.fetch = mockFetch((role, body) => {
       if (role === "oracle") {
         oracleCalls += 1;
         if (String(body.messages?.[0]?.content ?? "").includes("ephemeral sandbox reviewer")) {
-          return [chatReply({ text: '{"allow":true,"reason":"Read-only command."}' })];
+          throw new Error("Ordinary sandboxed commands must not be reviewed");
         }
         if (oracleCalls === 1) {
           return [
@@ -118,7 +133,7 @@ describe("scheduler", () => {
             })
           ];
         }
-        return [chatReply({ text: "The command evidence satisfies the work order." })];
+        return [submitReviewReply({ workOrderId: store.workOrders(session.id)[0]!.id })];
       }
       if (role === "executor" && executorCalls++ === 0) {
         return [
@@ -126,7 +141,10 @@ describe("scheduler", () => {
             calls: [
               {
                 name: "shell_exec",
-                arguments: { command: "printf reviewed > reviewed.txt" }
+                arguments: {
+                  command: "printf reviewed > reviewed.txt",
+                  execution: "sandboxed"
+                }
               }
             ]
           }),
@@ -141,18 +159,11 @@ describe("scheduler", () => {
       apiToken: "secret",
       authDisabled: false
     });
-    const store = new Store(join(fixture.dataDir, "brawl.sqlite"));
     const scheduler = new Scheduler({
       store,
       configStore: new ConfigStore(runtime.configPath, fixture.workspace),
       events: new SessionEvents(),
       runtime
-    });
-    const session = store.createSession({
-      title: "Auto review approval",
-      mode: "productive",
-      sandboxMode: "auto-review",
-      workspace: fixture.workspace
     });
     try {
       await scheduler.start(session.id, "Create reviewed.txt.", "productive");
@@ -173,6 +184,13 @@ describe("scheduler", () => {
     const fixture = await makeHarnessFixture();
     let oracleCalls = 0;
     let executorCalls = 0;
+    const store = new Store(join(fixture.dataDir, "brawl.sqlite"));
+    const session = store.createSession({
+      title: "Auto review denial",
+      mode: "productive",
+      sandboxMode: "auto-review",
+      workspace: fixture.workspace
+    });
     globalThis.fetch = mockFetch((role, body) => {
       if (role === "oracle") {
         oracleCalls += 1;
@@ -195,7 +213,7 @@ describe("scheduler", () => {
             })
           ];
         }
-        return [chatReply({ text: "The refusal is expected." })];
+        return [submitReviewReply({ workOrderId: store.workOrders(session.id)[0]!.id })];
       }
       if (role === "executor" && executorCalls++ === 0) {
         return [
@@ -203,7 +221,11 @@ describe("scheduler", () => {
             calls: [
               {
                 name: "shell_exec",
-                arguments: { command: "printf denied > denied.txt" }
+                arguments: {
+                  command: "printf denied > denied.txt",
+                  execution: "host",
+                  hostReason: "The work order needs host execution."
+                }
               }
             ]
           }),
@@ -218,18 +240,11 @@ describe("scheduler", () => {
       apiToken: "secret",
       authDisabled: false
     });
-    const store = new Store(join(fixture.dataDir, "brawl.sqlite"));
     const scheduler = new Scheduler({
       store,
       configStore: new ConfigStore(runtime.configPath, fixture.workspace),
       events: new SessionEvents(),
       runtime
-    });
-    const session = store.createSession({
-      title: "Auto review denial",
-      mode: "productive",
-      sandboxMode: "auto-review",
-      workspace: fixture.workspace
     });
     try {
       await scheduler.start(session.id, "Do not access the network.", "productive");
@@ -260,6 +275,13 @@ describe("scheduler", () => {
     const fixture = await makeHarnessFixture();
     let oracleCalls = 0;
     let executorCalls = 0;
+    const store = new Store(join(fixture.dataDir, "brawl.sqlite"));
+    const session = store.createSession({
+      title: "Fail closed",
+      mode: "productive",
+      sandboxMode: "auto-review",
+      workspace: fixture.workspace
+    });
     globalThis.fetch = mockFetch((role, body) => {
       if (role === "oracle") {
         oracleCalls += 1;
@@ -282,12 +304,19 @@ describe("scheduler", () => {
             })
           ];
         }
-        return [chatReply({ text: "Review complete." })];
+        return [submitReviewReply({ workOrderId: store.workOrders(session.id)[0]!.id })];
       }
       if (role === "executor" && executorCalls++ === 0) {
         return [
           chatReply({
-            calls: [{ name: "shell_exec", arguments: { command: "printf fail-closed > ran.txt" } }]
+            calls: [{
+              name: "shell_exec",
+              arguments: {
+                command: "printf fail-closed > ran.txt",
+                execution: "host",
+                hostReason: "The command needs host execution."
+              }
+            }]
           }),
           chatReply({ text: "Command refused." })
         ];
@@ -300,18 +329,11 @@ describe("scheduler", () => {
       apiToken: "secret",
       authDisabled: false
     });
-    const store = new Store(join(fixture.dataDir, "brawl.sqlite"));
     const scheduler = new Scheduler({
       store,
       configStore: new ConfigStore(runtime.configPath, fixture.workspace),
       events: new SessionEvents(),
       runtime
-    });
-    const session = store.createSession({
-      title: "Fail closed",
-      mode: "productive",
-      sandboxMode: "auto-review",
-      workspace: fixture.workspace
     });
     try {
       await scheduler.start(session.id, "Test safe failure.", "productive");
