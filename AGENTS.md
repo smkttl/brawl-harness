@@ -1,0 +1,40 @@
+# AGENTS.md
+
+## Project shape
+
+- `src/server/` contains the Fastify API, SQLite store, provider adapters, scheduler, and workspace tools.
+- `src/shared/` contains protocol types, SSE parsing, and role/mode prompts shared by all clients.
+- `src/web/` is the Vite/React frontend.
+- `src/tui/` and `src/cli.ts` are the terminal frontend and detached-server/client commands.
+
+## Role invariants
+
+- Oracle is the decision authority. It submits plans, creates work orders, and reviews Executor evidence.
+- Executor is the only role with workspace tools. Productive tools require an active Oracle work order.
+- Speaker is the only role that receives user messages and produces user-facing summaries. It uses `ask_user` for material ambiguity.
+- Any role may use `send_steer`; steering is queued and delivered at the recipient's next model boundary.
+- Never expose provider credentials or raw chain-of-thought. Transcript events may contain provider-safe summaries, usage, tool calls/results, and visible messages only.
+
+## Mode behavior
+
+- Productive mode follows Oracle -> Executor -> Oracle review -> Speaker summary.
+- Fun mode uses competitive/quarrelsome prompts. Executor proposals are immutable and require explicit rationale-backed votes from all three roles. No workspace action executes without unanimous approval.
+- Incomplete voting pauses at `awaiting_user`; exhausted debate asks Speaker to explain the deadlock. Do not silently turn a missing vote into a rejection.
+
+## Persistence and lifecycle
+
+- SQLite is the source of truth for sessions, agent state, transcript events, work orders, proposals, and pending steering.
+- Backend runs must continue when clients disconnect. Pause/stop aborts active model calls; restart recovery marks in-flight sessions interrupted and pending proposals stale.
+- Keep credentials, SQLite files, logs, coverage, and build output out of Git. See `.gitignore`.
+
+## Safe changes
+
+- Keep all workspace paths inside the configured workspace and preserve approval/stale-write checks in `src/server/tools.ts`.
+- Keep API secrets server-side; public config must use `redactProvider`.
+- When changing provider request formats, test both Chat Completions and Responses streaming paths.
+- Add scheduler tests for every new state transition, especially fun-mode vote and resume behavior.
+- Use `apply_patch` for manual edits and preserve unrelated user changes.
+
+## Verification
+
+Run `npm run typecheck`, `npm test`, `npm run lint`, and `npm run build` before committing. Use conventional commits: `type(scope): description`.

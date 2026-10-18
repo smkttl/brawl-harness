@@ -1,0 +1,50 @@
+{
+  "name": "brawl-harness",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Three-agent local coding harness with a web and terminal frontend.",
+  "bin": {
+    "brawl": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "npm run build:web && npm run build:server",
+    "build:server": "tsc -p tsconfig.server.json",
+    "build:web": "vite build",
+    "dev": "tsx watch src/server/index.ts",
+    "dev:web": "vite",
+    "start": "node dist/server/index.js",
+    "brawl": "tsx src/cli.ts",
+    "typecheck": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.web.json --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "dependencies": {
+    "@fastify/static": "10.1.6",
+    "@types/markdown-it": "14.1.2",
+    "commander": "15.0.0",
+    "fastify": "5.12.7",
+    "ink": "8.0.0",
+    "markdown-it": "15.0.3",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "yaml": "2.9.1",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.5",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.1.2",
+    "eslint": "10.13.0",
+    "tsx": "4.23.15",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.71.2",
+    "vite": "8.3.4",
+    "vitest": "5.0.5"
+  }
+}
