@@ -39,6 +39,7 @@ export class BubblewrapSandbox {
     const workspace = await realpath(this.workspace).catch(() => {
       throw new Error(`Sandbox workspace does not exist: ${this.workspace}`);
     });
+    signal.throwIfAborted();
     const timeoutMs = boundedTimeout(timeoutOverride, this.timeoutMs);
     const args = [
       "--unshare-all",
@@ -165,22 +166,25 @@ function runProcess(
   timeoutMs: number,
   signal: AbortSignal
 ): Promise<SandboxRunResult> {
+  signal.throwIfAborted();
   return new Promise((resolvePromise) => {
     const child = spawn(command, args, {
       cwd,
       env: {},
-      stdio: ["ignore", "pipe", "pipe"]
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: true
     });
     let stdout = "";
     let stderr = "";
     let timedOut = false;
     let settled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
     const append = (current: string, chunk: Buffer) =>
       `${current}${chunk.toString("utf8")}`.slice(0, 150_000);
     const finish = (result: SandboxRunResult) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
       signal.removeEventListener("abort", abort);
       resolvePromise(result);
     };
@@ -191,18 +195,18 @@ function runProcess(
       stderr = append(stderr, chunk);
     });
     const terminate = () => {
-      if (child.exitCode !== null) return;
-      child.kill("SIGTERM");
+      signalGroup(child.pid, "SIGTERM");
       setTimeout(() => {
-        if (child.exitCode === null) child.kill("SIGKILL");
+        signalGroup(child.pid, "SIGKILL");
       }, 2_000).unref();
     };
-    const timer = setTimeout(() => {
+    timer = setTimeout(() => {
       timedOut = true;
       terminate();
     }, timeoutMs);
     const abort = () => terminate();
-    signal.addEventListener("abort", abort, { once: true });
+    if (signal.aborted) abort();
+    else signal.addEventListener("abort", abort, { once: true });
     child.on("error", (error) => {
       finish({
         stdout,
@@ -215,4 +219,13 @@ function runProcess(
       finish({ stdout, stderr, code, timedOut });
     });
   });
+}
+
+function signalGroup(pid: number | undefined, signal: NodeJS.Signals): void {
+  if (!pid) return;
+  try {
+    process.kill(-pid, signal);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+  }
 }

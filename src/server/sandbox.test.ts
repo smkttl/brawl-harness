@@ -77,12 +77,14 @@ describe("Bubblewrap sandbox", () => {
   it.skipIf(!sandboxSupported)("enforces timeout and abort", async () => {
     const root = await mkdtemp(join(tmpdir(), "brawl-sandbox-"));
     const tools = new WorkspaceTools(root, 10_000, "enabled");
+    const started = Date.now();
     const timed = await tools.execute(
       "shell_exec",
       { command: "sleep 5", timeoutMs: 1_000 },
       new AbortController().signal
     );
     expect(timed.data?.timedOut).toBe(true);
+    expect(Date.now() - started).toBeLessThan(4_000);
 
     const controller = new AbortController();
     const pending = tools.execute(
@@ -90,8 +92,10 @@ describe("Bubblewrap sandbox", () => {
       { command: "sleep 5" },
       controller.signal
     );
+    const abortStarted = Date.now();
     controller.abort(new Error("test abort"));
     const aborted = await pending;
     expect(aborted.ok).toBe(false);
+    expect(Date.now() - abortStarted).toBeLessThan(4_000);
   });
 });

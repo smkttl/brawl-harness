@@ -280,11 +280,13 @@ async function runProcess(
   timeoutMs: number,
   signal: AbortSignal
 ): Promise<{ stdout: string; stderr: string; code: number | null; timedOut: boolean }> {
+  signal.throwIfAborted();
   return new Promise((resolvePromise) => {
     const child = spawn(command, args, {
       cwd,
       env: { ...process.env },
-      stdio: ["ignore", "pipe", "pipe"]
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: true
     });
     let stdout = "";
     let stderr = "";
@@ -299,14 +301,15 @@ async function runProcess(
     });
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill("SIGTERM");
-      setTimeout(() => child.kill("SIGKILL"), 2_000).unref();
+      signalProcessGroup(child.pid, "SIGTERM");
+      setTimeout(() => signalProcessGroup(child.pid, "SIGKILL"), 2_000).unref();
     }, timeoutMs);
     const abort = () => {
-      child.kill("SIGTERM");
-      setTimeout(() => child.kill("SIGKILL"), 2_000).unref();
+      signalProcessGroup(child.pid, "SIGTERM");
+      setTimeout(() => signalProcessGroup(child.pid, "SIGKILL"), 2_000).unref();
     };
-    signal.addEventListener("abort", abort, { once: true });
+    if (signal.aborted) abort();
+    else signal.addEventListener("abort", abort, { once: true });
     child.on("error", (error) => {
       clearTimeout(timer);
       signal.removeEventListener("abort", abort);
@@ -318,6 +321,15 @@ async function runProcess(
       resolvePromise({ stdout, stderr, code, timedOut });
     });
   });
+}
+
+function signalProcessGroup(pid: number | undefined, signal: NodeJS.Signals): void {
+  if (!pid) return;
+  try {
+    process.kill(-pid, signal);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+  }
 }
 
 async function fileHashOrNull(path: string): Promise<string> {
