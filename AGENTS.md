@@ -47,4 +47,12 @@
 
 ## Verification
 
-Run `npm run typecheck`, `npm test`, `npm run lint`, and `npm run build` before committing. Use conventional commits: `type(scope): description`.
+- Sandbox verification is user-run only. Agents must never execute `scripts/probe-bwrap.sh`, `npm run sandbox:probe`, `src/server/sandbox.test.ts`, or any equivalent Bubblewrap integration test, including through sandbox escalation.
+- Ask the user to run the sandbox probe and forced sandbox tests, then inspect the provided output:
+
+```bash
+npm run sandbox:probe
+BRAWL_REQUIRE_SANDBOX=1 npx vitest run src/server/sandbox.test.ts --reporter=verbose
+```
+
+- For agent verification, run `npm run typecheck`, non-sandbox tests with `npx vitest run --exclude src/server/sandbox.test.ts`, `npm run lint`, and `npm run build` before committing. Use conventional commits: `type(scope): description`.
