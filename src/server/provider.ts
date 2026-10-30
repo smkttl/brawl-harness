@@ -57,19 +57,37 @@ export async function complete(request: ModelRequest): Promise<ModelReply> {
 }
 
 export async function discoverModels(provider: ProviderConfig): Promise<string[]> {
-  const response = await fetch(endpoint(provider, "models"), {
-    headers: requestHeaders(provider)
-  });
-  if (!response.ok) {
-    throw new BrawlError(`Model discovery failed (${response.status})`, 502);
+  let response: Response;
+  try {
+    response = await fetch(endpoint(provider, "models"), {
+      headers: requestHeaders(provider),
+      signal: AbortSignal.timeout(15_000)
+    });
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new BrawlError(`Model discovery request failed: ${reason}`, 502);
   }
-  const body = (await response.json()) as {
+  if (!response.ok) {
+    const detail = (await response.text().catch(() => "")).replace(/\s+/g, " ").trim().slice(0, 300);
+    throw new BrawlError(
+      `Model discovery failed (${response.status})${detail ? `: ${detail}` : ""}`,
+      502
+    );
+  }
+  let body: {
     data?: Array<{ id?: string }>;
     models?: Array<{ id?: string; name?: string }>;
   };
+  try {
+    body = (await response.json()) as typeof body;
+  } catch {
+    throw new BrawlError("Model discovery returned invalid JSON", 502);
+  }
   const ids = [
-    ...(body.data ?? []).map((model) => model.id),
-    ...(body.models ?? []).map((model) => model.id ?? model.name)
+    ...(Array.isArray(body.data) ? body.data.map((model) => model?.id) : []),
+    ...(Array.isArray(body.models)
+      ? body.models.map((model) => model?.id ?? model?.name)
+      : [])
   ].filter((id): id is string => Boolean(id));
   return [...new Set(ids)].sort();
 }
