@@ -81,7 +81,8 @@ export async function buildApp(runtime: RuntimeOptions, opts: { logger?: boolean
   });
 
   app.addHook("onRequest", async (request: FastifyRequest, reply: FastifyReply) => {
-    if (request.url === "/health") return;
+    const pathname = request.url.split("?", 1)[0] ?? "";
+    if (pathname === "/health" || !pathname.startsWith("/api/")) return;
     if (runtime.authDisabled) return;
     const header = request.headers.authorization;
     if (header !== `Bearer ${runtime.apiToken}`) {
@@ -89,8 +90,13 @@ export async function buildApp(runtime: RuntimeOptions, opts: { logger?: boolean
       return reply;
     }
     if (request.method !== "GET" && request.headers.origin) {
-      const expected = `http://${runtime.host}:${runtime.port}`;
-      if (![expected, "http://127.0.0.1:8787", "http://localhost:8787"].includes(request.headers.origin)) {
+      let originHost: string | null = null;
+      try {
+        originHost = new URL(request.headers.origin).host;
+      } catch {
+        // A malformed Origin cannot match the request host.
+      }
+      if (!originHost || originHost !== request.headers.host) {
         await reply.status(403).send({ error: "Origin not allowed" });
         return reply;
       }

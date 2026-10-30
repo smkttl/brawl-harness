@@ -60,6 +60,52 @@ describe("backend", () => {
     }
   });
 
+  it("allows the web shell without a token but enforces same-origin writes", async () => {
+    const fixture = await makeHarnessFixture();
+    const runtime = resolveRuntime({
+      dataDir: fixture.dataDir,
+      workspace: fixture.workspace,
+      apiToken: "secret",
+      authDisabled: false
+    });
+    const { app, context } = await buildApp(runtime);
+    try {
+      const shell = await app.inject({
+        method: "GET",
+        url: "/assets/app.js",
+        headers: { host: "harness.example:15765" }
+      });
+      expect(shell.statusCode).not.toBe(401);
+
+      const foreignOrigin = await app.inject({
+        method: "POST",
+        url: "/api/sessions",
+        headers: {
+          authorization: "Bearer secret",
+          host: "harness.example:15765",
+          origin: "https://attacker.example"
+        },
+        payload: { mode: "productive", workspace: fixture.workspace }
+      });
+      expect(foreignOrigin.statusCode).toBe(403);
+
+      const sameOrigin = await app.inject({
+        method: "POST",
+        url: "/api/sessions",
+        headers: {
+          authorization: "Bearer secret",
+          host: "harness.example:15765",
+          origin: "http://harness.example:15765"
+        },
+        payload: { mode: "productive", workspace: fixture.workspace }
+      });
+      expect(sameOrigin.statusCode).toBe(200);
+    } finally {
+      await app.close();
+      context.store.close();
+    }
+  });
+
   it("pauses for Speaker clarification before planning an ambiguous request", async () => {
     const fixture = await makeHarnessFixture();
     let oracleCalls = 0;
