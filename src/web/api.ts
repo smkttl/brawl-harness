@@ -97,7 +97,10 @@ export const api = {
   deleteProvider: (id: string) =>
     request<{ ok: true }>(`/api/providers/${id}`, { method: "DELETE" }),
   discoverModels: (id: string) =>
-    request<{ models: string[] }>(`/api/providers/${id}/models`, { method: "POST" }),
+    request<{ models: string[] }>(`/api/providers/${id}/models`, {
+      method: "POST",
+      body: "{}"
+    }),
   updateAgent: (role: Role, input: AgentUpdate) =>
     request<PublicHarnessConfig>(`/api/agents/${role}`, {
       method: "PUT",

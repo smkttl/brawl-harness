@@ -106,6 +106,42 @@ describe("backend", () => {
     }
   });
 
+  it("discovers models from the browser request shape", async () => {
+    const fixture = await makeHarnessFixture();
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      expect(String(input)).toBe("http://mock.invalid/v1/models");
+      return new Response(JSON.stringify({ data: [{ id: "model-a" }, { id: "model-b" }] }), {
+        status: 200
+      });
+    }) as typeof fetch;
+    const { app, context } = await buildApp(
+      resolveRuntime({
+        dataDir: fixture.dataDir,
+        workspace: fixture.workspace,
+        apiToken: "secret",
+        authDisabled: false
+      })
+    );
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: `/api/providers/${fixture.providerId}/models`,
+        headers: {
+          authorization: "Bearer secret",
+          "content-type": "application/json",
+          host: "harness.example:15765",
+          origin: "https://harness.example:15765"
+        },
+        payload: {}
+      });
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toEqual({ models: ["model-a", "model-b"] });
+    } finally {
+      await app.close();
+      context.store.close();
+    }
+  });
+
   it("pauses for Speaker clarification before planning an ambiguous request", async () => {
     const fixture = await makeHarnessFixture();
     let oracleCalls = 0;
