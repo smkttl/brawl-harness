@@ -721,8 +721,21 @@ describe("backend", () => {
     let executorCalls = 0;
     globalThis.fetch = mockFetch((role, body) => {
       const serialized = JSON.stringify(body.messages);
-      const deliberation = serialized.match(/Fun-mode deliberation for proposal ([0-9a-f-]{36}), round (\d+)/);
-      if (deliberation && !serialized.includes("Tool cast_vote result is above. Continue.")) {
+      if (role === "speaker" && serialized.includes("debate ended")) {
+        return [chatReply({ text: "The team could not agree. Should I ask them to retry the read?" })];
+      }
+      const deliberation = [
+        ...serialized.matchAll(
+          /Fun-mode deliberation for proposal ([0-9a-f-]{36}), round (\d+)/g
+        )
+      ].at(-1);
+      const sinceDeliberation = deliberation
+        ? serialized.slice(deliberation.index ?? 0)
+        : "";
+      if (
+        deliberation &&
+        !sinceDeliberation.includes("Tool cast_vote result is above. Continue.")
+      ) {
         return [
           chatReply({
             calls: [
@@ -762,9 +775,6 @@ describe("backend", () => {
           chatReply({ text: "Read action proposed." })
         ];
       }
-      if (role === "speaker" && serialized.includes("debate ended")) {
-        return [chatReply({ text: "The team could not agree. Should I ask them to retry the read?" })];
-      }
       return [chatReply({ text: "The action needs another review." })];
     });
     const runtime = resolveRuntime({
@@ -791,7 +801,16 @@ describe("backend", () => {
         headers,
         payload: { content: "Read the README." }
       });
-      await waitFor(() => context.store.getSession(id)?.status === "awaiting_user", 5_000);
+      await waitFor(
+        () =>
+          context.store.getSession(id)?.status === "awaiting_user" &&
+          context.store
+            .sessionDetail(id)!
+            .events.some(
+              (event) => event.role === "speaker" && event.content.includes("could not agree")
+            ),
+        5_000
+      );
       const detail = context.store.sessionDetail(id)!;
       expect(detail.events.filter((event) => event.type === "vote")).toHaveLength(6);
       expect(

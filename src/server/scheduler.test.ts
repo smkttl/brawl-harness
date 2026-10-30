@@ -20,6 +20,84 @@ afterEach(() => {
 });
 
 describe("scheduler", () => {
+  it("answers every tool call when a boundary tool is batched with another call", async () => {
+    const fixture = await makeHarnessFixture();
+    const store = new Store(join(fixture.dataDir, "brawl.sqlite"));
+    const session = store.createSession({
+      title: "Tool call pairing",
+      mode: "fun",
+      sandboxMode: "disabled",
+      workspace: fixture.workspace
+    });
+    let sawCompletePayload = false;
+    let lastToolIds: string[] = [];
+    let lastRequestedIds: string[] = [];
+    globalThis.fetch = mockFetch((role, body) => {
+      const toolMessages = (body.messages as Array<{ role: string; tool_call_id?: string }>).filter(
+        (message) => message.role === "tool"
+      );
+      const assistant = (body.messages as Array<{
+        role: string;
+        tool_calls?: Array<{ id: string }>;
+      }>).find((message) => message.role === "assistant" && message.tool_calls?.length);
+      if (assistant) {
+        const requested = assistant.tool_calls!.map((call) => call.id).sort();
+        const answered = toolMessages.map((message) => message.tool_call_id!).sort();
+        lastRequestedIds = requested;
+        lastToolIds = answered;
+        sawCompletePayload = true;
+      }
+      if (role === "speaker" && !sawCompletePayload) {
+        return [
+          chatReply({
+            calls: [
+              {
+                id: "call-steer",
+                name: "send_steer",
+                arguments: {
+                  to: "oracle",
+                  content: "Use the user's exact request.",
+                  urgent: true
+                }
+              },
+              {
+                id: "call-plan",
+                name: "submit_plan",
+                arguments: { content: "This call must not run after the steering boundary." }
+              }
+            ]
+          })
+        ];
+      }
+      return [chatReply({ text: "Acknowledged." })];
+    });
+    const runtime = resolveRuntime({
+      dataDir: fixture.dataDir,
+      workspace: fixture.workspace,
+      apiToken: "secret",
+      authDisabled: false
+    });
+    const scheduler = new Scheduler({
+      store,
+      configStore: new ConfigStore(runtime.configPath, fixture.workspace),
+      events: new SessionEvents(),
+      runtime
+    });
+    try {
+      await scheduler.start(session.id, "Create a file.", "productive");
+      await waitFor(() => sawCompletePayload, 5_000);
+      expect(lastToolIds).toEqual(lastRequestedIds);
+      expect(
+        store.events(session.id).some(
+          (event) => event.type === "plan" && event.content.includes("must not run")
+        )
+      ).toBe(false);
+    } finally {
+      scheduler.stop(session.id);
+      store.close();
+    }
+  });
+
   it("runs the steered role instead of ending with pending steering", async () => {
     const fixture = await makeHarnessFixture();
     const store = new Store(join(fixture.dataDir, "brawl.sqlite"));

@@ -700,16 +700,22 @@ export class Scheduler {
           break;
         }
 
+        let endTurn = false;
         for (const call of reply.toolCalls) {
-          const result = await this.dispatchTool(
-            sessionId,
-            role,
-            call.name,
-            call.arguments,
-            controller.signal,
-            mode,
-            options
-          );
+          const result = endTurn
+            ? JSON.stringify({
+                ok: false,
+                output: "Skipped because an earlier tool call in this response ended the turn."
+              })
+            : await this.dispatchTool(
+                sessionId,
+                role,
+                call.name,
+                call.arguments,
+                controller.signal,
+                mode,
+                options
+              );
           actor.history.push({
             role: "tool",
             toolCallId: call.id,
@@ -721,9 +727,10 @@ export class Scheduler {
             role: "user",
             content: `Tool ${call.name} result is above. Continue.`
           });
-          if (call.name === "send_steer") break;
-          if (this.requireSession(sessionId).status === "awaiting_user") break;
+          if (call.name === "send_steer") endTurn = true;
+          if (this.requireSession(sessionId).status === "awaiting_user") endTurn = true;
         }
+        if (endTurn) break;
       }
       if (!boundaryReached) throw new BrawlError(`${role} made no progress`);
     } catch (error) {
