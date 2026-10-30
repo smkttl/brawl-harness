@@ -20,6 +20,79 @@ afterEach(() => {
 });
 
 describe("scheduler", () => {
+  it("runs the steered role instead of ending with pending steering", async () => {
+    const fixture = await makeHarnessFixture();
+    const store = new Store(join(fixture.dataDir, "brawl.sqlite"));
+    const session = store.createSession({
+      title: "Steer delivery",
+      mode: "fun",
+      sandboxMode: "disabled",
+      workspace: fixture.workspace
+    });
+    let oracleCalls = 0;
+    let speakerCalls = 0;
+    globalThis.fetch = mockFetch((role, body) => {
+      const serialized = JSON.stringify(body.messages);
+      if (role === "speaker" && !serialized.includes("Relay the user's exact requirements")) {
+        return [chatReply({ text: "The user said: write a hello file." })];
+      }
+      if (role === "oracle" && oracleCalls++ === 0) {
+        return [
+          chatReply({
+            calls: [
+              {
+                name: "send_steer",
+                arguments: {
+                  to: "speaker",
+                  content: "Relay the user's exact requirements before anyone plans.",
+                  urgent: true
+                }
+              }
+            ]
+          })
+        ];
+      }
+      if (role === "speaker" && speakerCalls++ === 0) {
+        expect(serialized).toContain("Relay the user's exact requirements");
+        return [chatReply({ text: "Oracle asks me to relay this: write a hello file." })];
+      }
+      return [chatReply({ text: "Acknowledged." })];
+    });
+    const runtime = resolveRuntime({
+      dataDir: fixture.dataDir,
+      workspace: fixture.workspace,
+      apiToken: "secret",
+      authDisabled: false
+    });
+    const scheduler = new Scheduler({
+      store,
+      configStore: new ConfigStore(runtime.configPath, fixture.workspace),
+      events: new SessionEvents(),
+      runtime
+    });
+    try {
+      await scheduler.start(session.id, "Write a hello file.", "fun");
+      await waitFor(
+        () =>
+          store.events(session.id).some(
+            (event) =>
+              event.role === "speaker" &&
+              event.type === "agent_message" &&
+              event.content.includes("write a hello file")
+          ),
+        5_000
+      );
+      expect(
+        store.events(session.id).some(
+          (event) => event.role === "oracle" && event.type === "steer"
+        )
+      ).toBe(true);
+    } finally {
+      scheduler.stop(session.id);
+      store.close();
+    }
+  });
+
   it("completes a productive work order and records imported evidence", async () => {
     const fixture = await makeHarnessFixture();
     let oracleCalls = 0;

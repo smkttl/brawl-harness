@@ -311,9 +311,6 @@ export class Scheduler {
     this.requireSession(sessionId);
     if (from === to) throw new BrawlError("An agent cannot steer itself");
     if (!content.trim()) throw new BrawlError("Steer message cannot be empty");
-    if (urgent) {
-      this.abortRole(sessionId, to);
-    }
     this.store.queuePendingMessage({ sessionId, from, to, content, urgent });
     this.emit(sessionId, {
       role: from,
@@ -483,10 +480,15 @@ export class Scheduler {
           continue;
         }
         if (this.anyPendingSteer(sessionId)) {
-          this.store.setStatus(sessionId, "awaiting_user", "Agents still have steering to process.");
-          this.publishSession(sessionId);
-          completed = true;
-          break;
+          const steeredRoles = [...new Set(this.store.pendingMessages(sessionId).map((item) => item.to))];
+          await Promise.all(steeredRoles.map((role) => this.runAgent(sessionId, role, signal, mode, null)));
+          if (this.anyPendingSteer(sessionId)) {
+            this.store.setStatus(sessionId, "awaiting_user", "Agents still have steering to process.");
+            this.publishSession(sessionId);
+            completed = true;
+            break;
+          }
+          continue;
         }
         completed = true;
         this.store.setStatus(
@@ -595,8 +597,11 @@ export class Scheduler {
           const content = `Steer from teammate${pendingSteer.urgent ? " (urgent)" : ""}:\n${pendingSteer.content}`;
           messages.push({ role: "user", content });
           if (pendingSteer.urgent) {
-            controller.abort(new Error("Urgent steering"));
-            controller.signal.throwIfAborted();
+            this.emit(sessionId, {
+              role,
+              type: "status",
+              content: "Urgent steering received; applying it at the next model boundary."
+            });
           }
         }
         let reasoning = "";
@@ -719,7 +724,6 @@ export class Scheduler {
           if (call.name === "send_steer") break;
           if (this.requireSession(sessionId).status === "awaiting_user") break;
         }
-        if (this.isSessionSatisfied(sessionId)) break;
       }
       if (!boundaryReached) throw new BrawlError(`${role} made no progress`);
     } catch (error) {
@@ -1439,14 +1443,6 @@ Approve only if this exact command truly needs host capabilities that Bubblewrap
       ...(lastError === undefined ? {} : { lastError })
     });
     this.events.publish(sessionId, { type: "agent", agent });
-  }
-
-  private abortRole(sessionId: string, role: Role): void {
-    const turn = this.roleTurns.get(`${sessionId}:${role}`);
-    if (turn) {
-      turn.controller.abort(new Error("Urgent steering"));
-    }
-    this.setAgent(sessionId, role, "waiting", "Urgent steering queued");
   }
 
   private emit(
