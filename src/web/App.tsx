@@ -68,6 +68,10 @@ export function App() {
           : nextSessions.sessions[0]?.id;
       if (id && id !== selectedIdRef.current) setSelectedId(id);
       if (id) setDetail(await api.session(id));
+      else {
+        setSelectedId(null);
+        setDetail(null);
+      }
       setError(null);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -105,6 +109,18 @@ export function App() {
       setSelectedId(id);
       setDetail(await api.session(id));
       setView("chat");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  };
+
+  const deleteSession = async (id: string) => {
+    if (!window.confirm("Delete this session and its transcript?")) return;
+    try {
+      await api.deleteSession(id);
+      setDetail(null);
+      setSelectedId(null);
+      await refresh();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     }
@@ -215,6 +231,7 @@ export function App() {
             setView={setView}
             onError={setError}
             onSessionsChanged={refresh}
+            onDelete={deleteSession}
           />
         ) : (
           <EmptyRoom
@@ -340,13 +357,15 @@ function Workspace({
   view,
   setView,
   onError,
-  onSessionsChanged
+  onSessionsChanged,
+  onDelete
 }: {
   detail: SessionDetail;
   view: View;
   setView: (view: View) => void;
   onError: (error: string) => void;
   onSessionsChanged: () => Promise<void>;
+  onDelete: (id: string) => Promise<void>;
 }) {
   const session = detail.session;
   const agentMap = new Map(detail.agents.map((agent) => [agent.role, agent]));
@@ -406,7 +425,11 @@ function Workspace({
             <option value="disabled">Sandbox disabled</option>
             {session.mode === "productive" && <option value="auto-review">Auto review</option>}
           </select>
-          <button className="icon-action" onClick={() => void control("pause")}>
+          <button
+            className="icon-action"
+            disabled={!["queued", "running", "awaiting_consensus"].includes(session.status)}
+            onClick={() => void control("pause")}
+          >
             Pause
           </button>
           {["paused", "interrupted", "awaiting_user"].includes(session.status) && (
@@ -414,6 +437,12 @@ function Workspace({
               Resume
             </button>
           )}
+          <button
+            className="icon-action quiet-danger"
+            onClick={() => void onDelete(session.id)}
+          >
+            Delete
+          </button>
         </div>
       </header>
 
@@ -848,6 +877,7 @@ function Settings({
 }
 
 function applyEnvelope(current: SessionDetail | null, envelope: StreamEnvelope): SessionDetail | null {
+  if (envelope.type === "session_deleted") return null;
   if (!current && envelope.type === "snapshot") return envelope.snapshot;
   if (!current) return current;
   if (envelope.type === "snapshot") return envelope.snapshot;

@@ -27,8 +27,8 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const response = await fetch(path, {
     ...init,
     headers: {
-      "content-type": "application/json",
       authorization: `Bearer ${getToken()}`,
+      ...(init.body === undefined ? {} : { "content-type": "application/json" }),
       ...init.headers
     }
   });
@@ -74,8 +74,12 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ content })
     }),
-  pause: (id: string) => request<{ ok: true }>(`/api/sessions/${id}/pause`, { method: "POST" }),
-  resume: (id: string) => request<{ ok: true }>(`/api/sessions/${id}/resume`, { method: "POST" }),
+  pause: (id: string) =>
+    request<{ ok: true }>(`/api/sessions/${id}/pause`, { method: "POST", body: "{}" }),
+  resume: (id: string) =>
+    request<{ ok: true }>(`/api/sessions/${id}/resume`, { method: "POST", body: "{}" }),
+  deleteSession: (id: string) =>
+    request<{ ok: true }>(`/api/sessions/${id}`, { method: "DELETE" }),
   updateSession: (
     id: string,
     input: Partial<Pick<Session, "mode" | "sandboxMode" | "title">>

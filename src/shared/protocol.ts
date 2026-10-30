@@ -218,6 +218,7 @@ export interface ApiError {
 export type StreamEnvelope =
   | { type: "snapshot"; snapshot: SessionDetail }
   | { type: "event"; event: TranscriptEvent }
+  | { type: "session_deleted"; sessionId: string }
   | { type: "session"; session: Session }
   | { type: "agent"; agent: AgentState }
   | { type: "proposal"; proposal: ActionProposal | null }
