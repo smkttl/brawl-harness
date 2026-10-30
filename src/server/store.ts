@@ -202,6 +202,11 @@ export class Store {
     return row ? mapSession(row) : null;
   }
 
+  deleteSession(id: string): boolean {
+    const result = this.db.prepare("DELETE FROM sessions WHERE id = ?").run(id);
+    return result.changes > 0;
+  }
+
   sessionDetail(id: string, afterSeq = 0): SessionDetail | null {
     const session = this.getSession(id);
     if (!session) return null;

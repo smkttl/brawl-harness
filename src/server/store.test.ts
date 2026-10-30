@@ -6,6 +6,31 @@ import { describe, expect, it } from "vitest";
 import { Store } from "./store.js";
 
 describe("Store sandbox settings", () => {
+  it("deletes a session and its dependents", async () => {
+    const root = await mkdtemp(join(tmpdir(), "brawl-store-"));
+    const store = new Store(join(root, "brawl.sqlite"));
+    try {
+      const session = store.createSession({
+        title: "Delete me",
+        mode: "productive",
+        sandboxMode: "disabled",
+        workspace: root
+      });
+      store.appendEvent({
+        sessionId: session.id,
+        role: "user",
+        type: "user_message",
+        content: "remove this"
+      });
+      expect(store.deleteSession(session.id)).toBe(true);
+      expect(store.getSession(session.id)).toBeNull();
+      expect(store.events(session.id)).toEqual([]);
+      expect(store.deleteSession(session.id)).toBe(false);
+    } finally {
+      store.close();
+    }
+  });
+
   it("defaults new sessions to enabled and persists mode changes", async () => {
     const root = await mkdtemp(join(tmpdir(), "brawl-store-"));
     const store = new Store(join(root, "brawl.sqlite"));

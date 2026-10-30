@@ -230,6 +230,14 @@ export async function buildApp(runtime: RuntimeOptions, opts: { logger?: boolean
     if (!detail) throw new BrawlError("Session not found", 404);
     return detail;
   });
+  app.delete("/api/sessions/:id", async (request) => {
+    const { id } = request.params as { id: string };
+    if (!store.getSession(id)) throw new BrawlError("Session not found", 404);
+    scheduler.stop(id);
+    if (!store.deleteSession(id)) throw new BrawlError("Session not found", 404);
+    events.publish(id, { type: "session_deleted", sessionId: id });
+    return { ok: true };
+  });
   app.post("/api/sessions/:id/messages", async (request) => {
     const { id } = request.params as { id: string };
     const input = messageSchema.parse(request.body) as SendMessageInput;

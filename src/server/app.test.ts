@@ -142,6 +142,62 @@ describe("backend", () => {
     }
   });
 
+  it("pauses, resumes, and deletes a session from the browser request shapes", async () => {
+    const fixture = await makeHarnessFixture();
+    const { app, context } = await buildApp(
+      resolveRuntime({
+        dataDir: fixture.dataDir,
+        workspace: fixture.workspace,
+        apiToken: "secret",
+        authDisabled: false
+      })
+    );
+    const headers = {
+      authorization: "Bearer secret",
+      host: "harness.example:15765",
+      origin: "https://harness.example:15765"
+    };
+    try {
+      const created = (
+        await app.inject({
+          method: "POST",
+          url: "/api/sessions",
+          headers,
+          payload: { mode: "productive", workspace: fixture.workspace, sandboxMode: "disabled" }
+        })
+      ).json();
+      const id = created.session.id as string;
+
+      const paused = await app.inject({
+        method: "POST",
+        url: `/api/sessions/${id}/pause`,
+        headers
+      });
+      expect(paused.statusCode).toBe(200);
+      expect(context.store.getSession(id)?.status).toBe("paused");
+
+      const resumed = await app.inject({
+        method: "POST",
+        url: `/api/sessions/${id}/resume`,
+        headers
+      });
+      expect(resumed.statusCode).toBe(200);
+      context.scheduler.stop(id);
+
+      const deleted = await app.inject({
+        method: "DELETE",
+        url: `/api/sessions/${id}`,
+        headers
+      });
+      expect(deleted.statusCode).toBe(200);
+      expect(context.store.getSession(id)).toBeNull();
+      expect(context.store.events(id)).toEqual([]);
+    } finally {
+      await app.close();
+      context.store.close();
+    }
+  });
+
   it("pauses for Speaker clarification before planning an ambiguous request", async () => {
     const fixture = await makeHarnessFixture();
     let oracleCalls = 0;
